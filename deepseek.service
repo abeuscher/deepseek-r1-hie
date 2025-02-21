@@ -1,0 +1,16 @@
+[Unit]
+Description=DeepSeek R1 Reasoning API Service
+After=network.target
+
+[Service]
+User=root
+WorkingDirectory=/root/deepseek-app/api
+ExecStart=/root/deepseek-app/venv/bin/python app.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment="PYTHONPATH=/root/deepseek-app"
+
+[Install]
+WantedBy=multi-user.target

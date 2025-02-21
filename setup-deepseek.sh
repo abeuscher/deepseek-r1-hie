@@ -1,6 +1,6 @@
 #!/bin/bash
 # DeepSeek Environment Setup Script
-# This script sets up the environment for running DeepSeek R1 reasoning component
+# This script sets up the environment for the DeepSeek-R1-Distill-Qwen-7B reasoning component
 # Usage: bash setup-deepseek.sh
 
 # Exit on any error
@@ -28,30 +28,29 @@ echo "Setting up Python virtual environment..."
 python3 -m venv venv
 source venv/bin/activate
 
-# Upgrade pip and install basic packages
+# Upgrade pip and install dependencies
 echo "Installing Python packages..."
 pip install --upgrade pip
-pip install torch fastapi uvicorn requests 
+pip install torch==2.1.0 fastapi uvicorn requests 
 
-# Install additional packages for DeepSeek
-echo "Installing DeepSeek dependencies..."
-pip install accelerate transformers
+# Install Hugging Face Transformers and related libraries
+echo "Installing model dependencies..."
+pip install transformers==4.38.0 accelerate sentencepiece protobuf
 
-# Clone DeepSeek-R1 repository
-echo "Cloning DeepSeek-R1 repository..."
-git clone https://github.com/deepseek-ai/DeepSeek-R1.git
-cd DeepSeek-R1
+# Create the API service directory
+mkdir -p $APP_DIR/api
+cd $APP_DIR/api
 
-# Install DeepSeek-R1 specific dependencies
-echo "Installing DeepSeek-R1 specific dependencies..."
-pip install -e .
+# Create a model directory where we'll download the model
+mkdir -p $APP_DIR/models
 
 echo "=== Setup complete! ==="
+echo "The environment has been prepared for DeepSeek-R1-Distill-Qwen-7B"
+echo ""
 echo "To activate the environment:"
 echo "  cd ~/deepseek-app"
 echo "  source venv/bin/activate"
 echo ""
 echo "Next steps:"
-echo "1. Configure your DeepSeek-R1 model settings"
-echo "2. Create your API service"
-echo "3. DeepSeek-R1 code is available in ~/deepseek-app/DeepSeek-R1"
+echo "1. Download the DeepSeek-R1-Distill-Qwen-7B model files"
+echo "2. Start the API service"
