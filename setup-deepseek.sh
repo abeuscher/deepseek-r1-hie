@@ -31,11 +31,11 @@ source venv/bin/activate
 # Upgrade pip and install dependencies
 echo "Installing Python packages..."
 pip install --upgrade pip
-pip install torch==2.1.0 fastapi uvicorn requests 
+pip install torch fastapi uvicorn requests 
 
 # Install Hugging Face Transformers and related libraries
 echo "Installing model dependencies..."
-pip install transformers==4.38.0 accelerate sentencepiece protobuf
+pip install transformers accelerate sentencepiece protobuf
 
 # Create the API service directory
 mkdir -p $APP_DIR/api
