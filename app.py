@@ -32,28 +32,18 @@ async def lifespan(app: FastAPI):
     logger.info(f"Loading model {MODEL_NAME}...")
     
     # Check if model is downloaded locally
-    if os.path.exists(MODEL_PATH) and os.path.isdir(MODEL_PATH):
-        logger.info(f"Loading model from local path: {MODEL_PATH}")
-        app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-        app.state.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_PATH, 
-            device_map=DEVICE,
-            torch_dtype=torch.float16,
-            trust_remote_code=True
-        )
-    else:
-        logger.info(f"Downloading model from Hugging Face: {MODEL_NAME}")
-        os.makedirs(MODEL_PATH, exist_ok=True)
-        app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        app.state.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME, 
-            device_map=DEVICE,
-            torch_dtype=torch.float16,
-            trust_remote_code=True
-        )
-        # Save the model locally for future use
-        app.state.tokenizer.save_pretrained(MODEL_PATH)
-        app.state.model.save_pretrained(MODEL_PATH)
+    logger.info(f"Downloading model from Hugging Face: {MODEL_NAME}")
+    os.makedirs(MODEL_PATH, exist_ok=True)
+    app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    app.state.model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME, 
+        device_map=DEVICE,
+        torch_dtype=torch.float16,
+        trust_remote_code=True
+    )
+    # Save the model locally for future use
+    app.state.tokenizer.save_pretrained(MODEL_PATH)
+    app.state.model.save_pretrained(MODEL_PATH)
     
     logger.info("Model loaded successfully!")
     yield
