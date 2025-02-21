@@ -2,7 +2,7 @@
 
 This repository contains code for running the DeepSeek-R1-Distill-Qwen-7B reasoning component as a microservice to filter and preprocess medical records before sending them to LLM APIs. It's designed to work with MAIA (Medical AI Assistant) and the NOSH patient record system.
 
-## Quick Setup
+## Quick Installation
 
 Follow these steps to set up the DeepSeek-R1 reasoning service on a fresh Ubuntu server:
 
@@ -12,63 +12,101 @@ Follow these steps to set up the DeepSeek-R1 reasoning service on a fresh Ubuntu
 - Minimum 8GB RAM (16GB recommended)
 - At least 50GB storage
 
-### Installation Steps
+### One-Step Installation
 
-1. Install Git if not already installed:
-   ```bash
-   sudo apt update
-   sudo apt install git -y
-   ```
+The easiest way to install is using the installation script:
 
-2. Clone this repository:
-   ```bash
-   git clone https://github.com/abeuscher/deepseek-r1-hie.git
-   cd deepseek-r1-hie
-   ```
+```bash
+# Install git
+sudo apt update
+sudo apt install git -y
 
-3. Run the setup script:
+# Clone the repository
+git clone https://github.com/abeuscher/deepseek-r1-hie.git
+cd deepseek-r1-hie
+
+# Run the installer
+chmod +x install.sh
+./install.sh
+```
+
+During the installation, you'll be prompted to set up SSL with Let's Encrypt if you have a domain name pointed to your server.
+
+### Manual Installation
+
+If you prefer to install step by step:
+
+1. Run the environment setup script:
    ```bash
    chmod +x setup-deepseek.sh
    ./setup-deepseek.sh
    ```
    This will install all required dependencies and prepare the environment.
 
-4. Copy the API service files:
+2. Copy the API service file:
    ```bash
    cp app.py ~/deepseek-app/api/
    ```
 
-5. Set up as a system service (optional but recommended):
+3. Start the service:
    ```bash
-   sudo cp deepseek.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable deepseek
    sudo systemctl start deepseek
    ```
 
-6. Alternatively, start the API manually:
-   ```bash
-   cd ~/deepseek-app
-   source venv/bin/activate
-   cd api
-   python app.py
-   ```
+## Using the API
 
-### Using the API
+Once running, the service provides a REST API with the following endpoints:
 
-Once running, the service provides a REST API endpoint at:
-- `http://your-server-ip:8000/process-context` - For preprocessing patient records
-- `http://your-server-ip:8000/health` - For checking service health
+- `GET /health` - For checking service health
+- `POST /process-context` - For preprocessing patient records
 
-Example curl request:
+Example request to process a patient record:
+
 ```bash
-curl -X POST "http://your-server-ip:8000/process-context" \
+curl -X POST "https://your-domain.com/process-context" \
      -H "Content-Type: application/json" \
      -d '{
            "patient_data": {"medical_history": {"...": "..."}},
            "query": "What medications is this patient taking for hypertension?",
            "max_context_length": 1000
          }'
+```
+
+## JavaScript Integration
+
+Here's how to integrate with JavaScript in your front-end application:
+
+```javascript
+// Using fetch API
+async function processPatientContext(patientData, query) {
+  const response = await fetch('https://your-domain.com/process-context', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      patient_data: patientData,
+      query: query,
+      max_context_length: 500
+    })
+  });
+  
+  if (!response.ok) {
+    throw new Error(`HTTP error! Status: ${response.status}`);
+  }
+  
+  return await response.json();
+}
+
+// Example usage
+processPatientContext(patientRecord, "What medications is this patient taking?")
+  .then(data => {
+    console.log("Relevant context:", data.relevant_context);
+    // Use this context in your LLM API call
+  })
+  .catch(error => {
+    console.error("Error:", error);
+  });
 ```
 
 ## System Architecture
@@ -78,22 +116,36 @@ This service acts as a preprocessing layer that:
 2. Uses DeepSeek-R1-Distill-Qwen-7B's reasoning capabilities to identify relevant portions of the record
 3. Returns only the contextually important information to be included in prompts to LLM APIs
 
-This approach allows handling large patient records without exceeding token limits in the main LLM services like Anthropic Claude or ChatGPT.
-
-## Model Information
-
-This service uses the DeepSeek-R1-Distill-Qwen-7B model, which is:
-- A distilled version of DeepSeek-R1's reasoning capabilities 
-- Optimized to run on standard hardware (7B parameters)
-- Specifically designed for complex reasoning tasks
-- Capable of running on a server with 16GB RAM
+This approach allows handling large patient records without exceeding token limits in main LLM services like Anthropic Claude or ChatGPT.
 
 ## Troubleshooting
 
-If you encounter any issues during setup:
-- Check the system logs: `sudo journalctl -u deepseek -f`
-- Ensure your server meets the minimum hardware requirements
-- Verify network connectivity for API access and model downloading
+If you encounter any issues:
+
+- Check the service status:
+  ```bash
+  sudo systemctl status deepseek
+  ```
+
+- View the logs:
+  ```bash
+  sudo journalctl -u deepseek -f
+  ```
+
+- Check available disk space:
+  ```bash
+  df -h
+  ```
+
+- Verify memory usage:
+  ```bash
+  free -h
+  ```
+
+If the service fails to start due to memory constraints, check that the swap file was created:
+```bash
+swapon --show
+```
 
 ## License
 

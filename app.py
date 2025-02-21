@@ -31,27 +31,27 @@ async def lifespan(app: FastAPI):
     # Load model and tokenizer on startup
     logger.info(f"Loading model {MODEL_NAME}...")
     
-    # Check if model is downloaded locally
     logger.info(f"Downloading model from Hugging Face: {MODEL_NAME}")
+    # Ensure the directory exists
     os.makedirs(MODEL_PATH, exist_ok=True)
+    # Download with memory-efficient settings
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     app.state.model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME, 
-        device_map=DEVICE,
+        device_map="auto",  # Let the library decide the optimal mapping
         torch_dtype=torch.float16,
-        trust_remote_code=True
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,  # Add this for more memory efficiency
+        offload_folder="offload"  # Enable disk offloading if needed
     )
-    # Save the model locally for future use
-    app.state.tokenizer.save_pretrained(MODEL_PATH)
-    app.state.model.save_pretrained(MODEL_PATH)
-    
     logger.info("Model loaded successfully!")
     yield
     # Clean up on shutdown
     logger.info("Shutting down and cleaning up...")
     del app.state.model
     del app.state.tokenizer
-    torch.cuda.empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 app = FastAPI(title="DeepSeek-R1 Reasoning API", lifespan=lifespan)
 
@@ -136,4 +136,6 @@ async def health_check():
     return {"status": "healthy", "model": MODEL_NAME, "device": DEVICE}
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
+    # Use localhost if behind a reverse proxy like Nginx
+    host = "127.0.0.1" if os.path.exists("/etc/nginx/sites-enabled/deepseek") else "0.0.0.0"
+    uvicorn.run("app:app", host=host, port=8000, reload=False)
