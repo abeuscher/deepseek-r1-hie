@@ -1,3 +1,6 @@
+deepseek-local/
+deepseek-local/*
+
 # Python related
 __pycache__/
 *.py[cod]

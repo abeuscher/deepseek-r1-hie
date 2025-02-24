@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List, Union
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from fastapi.middleware.cors import CORSMiddleware
 import json
 import uvicorn
 import os
@@ -54,6 +55,15 @@ async def lifespan(app: FastAPI):
         torch.cuda.empty_cache()
 
 app = FastAPI(title="DeepSeek-R1 Reasoning API", lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
 class ContextRequest(BaseModel):
     """Request model for context processing."""
