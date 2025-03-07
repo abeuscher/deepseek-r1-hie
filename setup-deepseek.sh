@@ -68,6 +68,8 @@ fi
 echo "Creating application directory..."
 APP_DIR=~/deepseek-app
 mkdir -p $APP_DIR
+mkdir -p $APP_DIR/api
+mkdir -p $APP_DIR/logs
 cd $APP_DIR
 
 # Set up Python virtual environment for both macOS and Linux
@@ -75,12 +77,12 @@ echo "Setting up Python virtual environment..."
 python3 -m venv venv
 if [ "$OS_TYPE" = "macos" ]; then
   source venv/bin/activate
-  PYTHON_CMD="$APP_DIR/venv/bin/python"
-  PIP_CMD="$APP_DIR/venv/bin/pip"
+  PYTHON_CMD="$APP_DIR/venv/bin/python3"
+  PIP_CMD="$APP_DIR/venv/bin/pip3"
 else
   source venv/bin/activate
-  PYTHON_CMD="$APP_DIR/venv/bin/python"
-  PIP_CMD="$APP_DIR/venv/bin/pip"
+  PYTHON_CMD="$APP_DIR/venv/bin/python3"
+  PIP_CMD="$APP_DIR/venv/bin/pip3"
 fi
 
 # Upgrade pip and install dependencies
@@ -102,10 +104,6 @@ $PIP_CMD install torch fastapi uvicorn requests
 # Install Hugging Face Transformers and related libraries
 echo "Installing model dependencies..."
 $PIP_CMD install transformers accelerate protobuf
-
-# Create the API service directory
-mkdir -p $APP_DIR/api
-cd $APP_DIR/api
 
 # Create a model directory where we'll download the model
 mkdir -p $APP_DIR/models
@@ -205,7 +203,7 @@ if [ "$OS_TYPE" = "macos" ]; then
     <string>com.deepseek.api</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$APP_DIR/venv/bin/python</string>
+        <string>$APP_DIR/venv/bin/python3</string>
         <string>$APP_DIR/api/app.py</string>
     </array>
     <key>RunAtLoad</key>
@@ -215,9 +213,9 @@ if [ "$OS_TYPE" = "macos" ]; then
     <key>WorkingDirectory</key>
     <string>$APP_DIR/api</string>
     <key>StandardOutPath</key>
-    <string>$APP_DIR/api/deepseek.log</string>
+    <string>$APP_DIR/logs/deepseek.log</string>
     <key>StandardErrorPath</key>
-    <string>$APP_DIR/api/deepseek-error.log</string>
+    <string>$APP_DIR/logs/deepseek-error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PYTHONPATH</key>
@@ -239,7 +237,7 @@ After=network.target
 [Service]
 User=root
 WorkingDirectory=$APP_DIR/api
-ExecStart=$APP_DIR/venv/bin/python app.py
+ExecStart=$APP_DIR/venv/bin/python3 app.py
 Restart=always
 RestartSec=10
 StandardOutput=journal

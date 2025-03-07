@@ -59,6 +59,10 @@ setup_service() {
   if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS uses launchd instead of systemd
     echo "Setting up service for macOS..."
+    
+    # Create log directory
+    mkdir -p ~/deepseek-app/logs
+    
     cat > ~/Library/LaunchAgents/com.deepseek.api.plist << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -68,7 +72,7 @@ setup_service() {
     <string>com.deepseek.api</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$(which python3)</string>
+        <string>$HOME/deepseek-app/venv/bin/python3</string>
         <string>$HOME/deepseek-app/api/app.py</string>
     </array>
     <key>RunAtLoad</key>
@@ -81,12 +85,17 @@ setup_service() {
     <string>$HOME/deepseek-app/logs/deepseek.log</string>
     <key>StandardErrorPath</key>
     <string>$HOME/deepseek-app/logs/deepseek-error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>$HOME/deepseek-app</string>
+    </dict>
 </dict>
 </plist>
 EOF
-    mkdir -p ~/deepseek-app/logs
+    # Unload the service first if it exists to avoid errors
+    launchctl unload ~/Library/LaunchAgents/com.deepseek.api.plist 2>/dev/null || true
     launchctl load ~/Library/LaunchAgents/com.deepseek.api.plist
-    launchctl start com.deepseek.api
   else
     # Linux systems with systemd
     echo "Setting up service for Linux..."
@@ -98,10 +107,11 @@ After=network.target
 [Service]
 User=$USER
 WorkingDirectory=$HOME/deepseek-app/api
-ExecStart=$(which python3) $HOME/deepseek-app/api/app.py
+ExecStart=$HOME/deepseek-app/venv/bin/python3 $HOME/deepseek-app/api/app.py
 Restart=always
 StandardOutput=journal
 StandardError=journal
+Environment="PYTHONPATH=$HOME/deepseek-app"
 
 [Install]
 WantedBy=multi-user.target
@@ -122,6 +132,7 @@ chmod +x setup-deepseek.sh
 
 # Create deepseek-app directory structure if it doesn't exist
 mkdir -p ~/deepseek-app/api
+mkdir -p ~/deepseek-app/logs
 
 # Copy the app.py file to the installation directory
 echo "Installing the API service..."
@@ -169,3 +180,9 @@ echo "- /health (GET): Check if the service is running"
 echo "- /process-context (POST): Process patient data and extract relevant context"
 echo ""
 echo "For more information, refer to the README.md file."
+echo ""
+echo "IMPORTANT: To manually run the application, you must use the virtual environment:"
+echo "  source ~/deepseek-app/venv/bin/activate"
+echo "  python3 ~/deepseek-app/api/app.py"
+echo "  # OR without activating the environment:"
+echo "  ~/deepseek-app/venv/bin/python3 ~/deepseek-app/api/app.py"
