@@ -41,7 +41,10 @@ if [ "$OS_TYPE" = "macos" ]; then
   
   echo "Installing Python and development tools..."
   brew update
-  brew install python3 git
+  
+  # Install required build dependencies for Python packages
+  echo "Installing build dependencies..."
+  brew install python3 git cmake pkg-config coreutils
   
   # Install nginx if SSL setup is requested
   if [ "$setup_ssl" = "y" ] || [ "$setup_ssl" = "Y" ]; then
@@ -53,7 +56,7 @@ else
   sudo apt upgrade -y
   
   echo "Installing Python and development tools..."
-  sudo apt install -y python3 python3-pip python3-dev python3-venv build-essential git
+  sudo apt install -y python3 python3-pip python3-dev python3-venv build-essential git cmake pkg-config
   
   # Install nginx and certbot if SSL setup is requested
   if [ "$setup_ssl" = "y" ] || [ "$setup_ssl" = "Y" ]; then
@@ -83,11 +86,22 @@ fi
 # Upgrade pip and install dependencies
 echo "Installing Python packages..."
 $PIP_CMD install --upgrade pip
+
+# For Mac, try to install a pre-built binary of sentencepiece first, then continue with remaining packages
+if [ "$OS_TYPE" = "macos" ]; then
+  echo "Installing pre-built sentencepiece package for macOS..."
+  $PIP_CMD install --upgrade pip wheel setuptools
+  
+  # Try using binary package if possible
+  $PIP_CMD install --no-build-isolation sentencepiece
+fi
+
+echo "Installing remaining Python packages..."
 $PIP_CMD install torch fastapi uvicorn requests
 
 # Install Hugging Face Transformers and related libraries
 echo "Installing model dependencies..."
-$PIP_CMD install transformers accelerate sentencepiece protobuf
+$PIP_CMD install transformers accelerate protobuf
 
 # Create the API service directory
 mkdir -p $APP_DIR/api
