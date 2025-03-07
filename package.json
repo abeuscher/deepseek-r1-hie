@@ -1,0 +1,55 @@
+{
+  "name": "deepseek-r1-hie",
+  "version": "1.0.0",
+  "description": "DeepSeek R1 Reasoning Engine for Healthcare Information Extraction",
+  "main": "app.py",
+  "private": true,
+  "scripts": {
+    "start": "launchctl load ~/Library/LaunchAgents/com.deepseek.api.plist",
+    "stop": "launchctl unload ~/Library/LaunchAgents/com.deepseek.api.plist",
+    "restart": "npm run stop && npm run start",
+    "status": "launchctl list | grep com.deepseek.api",
+    "run-direct": "cd ~/deepseek-app/api && ~/deepseek-app/venv/bin/python3 app.py",
+    "shell": "source ~/deepseek-app/venv/bin/activate",
+    
+    "install": "bash install.sh",
+    "optimize": "bash deepseek-optimize.sh",
+    "install-full": "bash install.sh && bash deepseek-optimize.sh",
+    
+    "logs": "cat ~/deepseek-app/logs/deepseek.log",
+    "logs:error": "cat ~/deepseek-app/logs/deepseek-error.log",
+    "logs:live": "tail -f ~/deepseek-app/logs/deepseek.log",
+    
+    "clear-cache": "curl -X GET http://localhost:8000/cache/clear",
+    "health": "curl -X GET http://localhost:8000/health",
+    
+    "list-files": "find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' | sort",
+    "list-dirs": "find . -type d -not -path '*/node_modules/*' -not -path '*/.git/*' | sort",
+    "tree": "find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' | sort | sed 's/[^/]*\\//│   /g;s/│   [^/]*/├── &/'",
+    
+    "backup": "mkdir -p backups && tar -czf backups/deepseek-backup-$(date +%Y%m%d-%H%M%S).tar.gz ~/deepseek-app",
+    "backup:app": "mkdir -p backups && cp ~/deepseek-app/api/app.py backups/app-backup-$(date +%Y%m%d-%H%M%S).py",
+    
+    "cleanup": "rm -rf ~/deepseek-app/cache/*",
+    "free-space": "df -h ~/",
+    "check-ram": "top -l 1 | grep PhysMem",
+    "system-info": "system_profiler SPHardwareDataType",
+    
+    "test-endpoint": "curl -X POST -H \"Content-Type: application/json\" -d @./test-data.json http://localhost:8000/process-context",
+    "generate-test-data": "echo '{\"patient_data\": {\"name\": \"Test Patient\", \"age\": 45}, \"query\": \"What is the patient diagnosis?\", \"max_context_length\": 500}' > test-data.json",
+    
+    "docs": "echo 'API Documentation' && echo 'Endpoints:' && echo '- GET /health: Check API health' && echo '- POST /process-context: Process patient data and extract context' && echo '- GET /cache/clear: Clear the request cache'"
+  },
+  "keywords": [
+    "deepseek",
+    "reasoning",
+    "healthcare",
+    "NLP",
+    "LLM"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
