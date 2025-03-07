@@ -35,24 +35,50 @@ TOP_P = 0.95
 CACHE_DIR = os.path.join(os.path.expanduser("~"), "deepseek-app", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Configure device with Apple Silicon optimization
+# Device configuration with offloading strategy
 if torch.backends.mps.is_available():
-    DEVICE = "mps"
-    # Enable Metal Performance Shaders optimizations
+    logger.info("Using hybrid CPU+MPS strategy for optimal performance")
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-    logger.info("Using Apple Silicon GPU (MPS) for inference")
-elif torch.cuda.is_available():
-    DEVICE = "cuda"
-    # Enable TF32 for better performance on NVIDIA GPUs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    if hasattr(torch.backends.cudnn, "allow_tf32"):
-        torch.backends.cudnn.allow_tf32 = True
-    logger.info("Using NVIDIA GPU (CUDA) for inference")
+    
+    # Device map for layer distribution
+    # Keep attention layers on GPU, offload FFNs to CPU to reduce memory usage
+    device_map = {
+        "model.embed_tokens": "mps",
+        "model.norm": "mps",
+        "lm_head": "mps"
+    }
+    
+    # Put some decoder layers on MPS, others on CPU
+    total_layers = 24  # Typical for a 7B model, adjust if needed
+    gpu_layers = 8     # Keep just enough layers on GPU for good performance
+    
+    for i in range(total_layers):
+        if i < gpu_layers:  # First layers on GPU
+            device_map[f"model.layers.{i}"] = "mps"
+        else:  # Remaining layers on CPU
+            device_map[f"model.layers.{i}"] = "cpu"
+    
+    model_kwargs = {
+        "pretrained_model_name_or_path": MODEL_NAME,
+        "trust_remote_code": True,
+        "device_map": device_map,
+        "torch_dtype": torch.float16,
+        "low_cpu_mem_usage": True,
+    }
 else:
-    DEVICE = "cpu"
-    # Optimize CPU threads
-    torch.set_num_threads(max(1, os.cpu_count() - 1))
-    logger.info("Using CPU for inference")
+    # Fallback to CPU or CUDA
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using {DEVICE} for inference")
+    
+    model_kwargs = {
+        "pretrained_model_name_or_path": MODEL_NAME,
+        "device_map": "auto",
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+    }
+    
+    if DEVICE == "cuda":
+        model_kwargs["torch_dtype"] = torch.float16
 
 # Helper function for caching
 def get_cache_key(patient_data, query, max_length):
