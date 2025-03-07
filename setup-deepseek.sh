@@ -67,15 +67,14 @@ APP_DIR=~/deepseek-app
 mkdir -p $APP_DIR
 cd $APP_DIR
 
-# Set up Python environment differently based on OS
-echo "Setting up Python environment..."
+# Set up Python virtual environment for both macOS and Linux
+echo "Setting up Python virtual environment..."
+python3 -m venv venv
 if [ "$OS_TYPE" = "macos" ]; then
-  # On macOS, we'll use a requirements file instead of venv
-  PYTHON_CMD="python3"
-  PIP_CMD="pip3"
+  source venv/bin/activate
+  PYTHON_CMD="$APP_DIR/venv/bin/python"
+  PIP_CMD="$APP_DIR/venv/bin/pip"
 else
-  # On Linux, create and activate a venv
-  python3 -m venv venv
   source venv/bin/activate
   PYTHON_CMD="$APP_DIR/venv/bin/python"
   PIP_CMD="$APP_DIR/venv/bin/pip"
@@ -192,7 +191,7 @@ if [ "$OS_TYPE" = "macos" ]; then
     <string>com.deepseek.api</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$(which python3)</string>
+        <string>$APP_DIR/venv/bin/python</string>
         <string>$APP_DIR/api/app.py</string>
     </array>
     <key>RunAtLoad</key>
@@ -241,6 +240,9 @@ EOF
   sudo systemctl daemon-reload
   sudo systemctl enable deepseek
 fi
+
+# Deactivate the virtual environment at the end
+deactivate || true
 
 echo "=== Setup complete! ==="
 echo "The environment has been prepared for DeepSeek-R1-Distill-Qwen-7B"
