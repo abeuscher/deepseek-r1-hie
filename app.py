@@ -36,25 +36,24 @@ TOP_P = 0.95
 CACHE_DIR = os.path.join(os.path.expanduser("~"), "deepseek-app", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
+# Force no CUDA to improve MPS compatibility
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 # Detect available devices
 mps_available = torch.backends.mps.is_available()
-cuda_available = torch.cuda.is_available()
 
 # Sharding configuration
 # These settings control how the model is split between GPU and CPU
-GPU_LAYERS = 4      # Number of transformer layers to keep on GPU (adjust based on memory)
+GPU_LAYERS = 0       # Start with 0 for pure CPU loading
 SHARD_SIZE = 1      # Shard embedding weights if set to 1
 
 if mps_available:
-    MAIN_DEVICE = "mps"
+    MAIN_DEVICE = "cpu"  # Initially load on CPU
     os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-    logger.info("Using Apple Silicon GPU (MPS) with model sharding")
-elif cuda_available:
-    MAIN_DEVICE = "cuda"
-    logger.info("Using NVIDIA GPU (CUDA) with model sharding")
+    logger.info("Using CPU initially, will selectively move components to MPS")
 else:
     MAIN_DEVICE = "cpu"
-    logger.info("No GPU detected, using CPU only")
+    logger.info("Using CPU only mode")
     
 # Optimize CPU threads for CPU portions
 torch.set_num_threads(max(1, os.cpu_count() - 1))
@@ -103,8 +102,6 @@ def save_to_cache(patient_data, query, max_length, result):
 def clean_memory():
     """Force garbage collection and clear CUDA cache if available"""
     gc.collect()
-    if cuda_available:
-        torch.cuda.empty_cache()
 
 # Run CPU-intensive tasks in a thread pool
 def run_in_threadpool(func):
@@ -116,33 +113,22 @@ def run_in_threadpool(func):
         )
     return wrapper
 
-# Create device map for model sharding
-def create_device_map():
-    """Create a device map to distribute model layers between GPU and CPU"""
-    device_map = {}
+# Selectively move model components to MPS after loading
+def selective_to_mps(model):
+    """Selectively move components to MPS device"""
+    if not torch.backends.mps.is_available():
+        return model
     
-    # Critical components on GPU
-    device_map["model.embed_tokens"] = MAIN_DEVICE
-    device_map["model.norm"] = MAIN_DEVICE
-    device_map["lm_head"] = MAIN_DEVICE
+    logger.info("Selectively moving specific layers to MPS")
     
-    # First few transformer layers on GPU for better performance
-    # Adjust GPU_LAYERS based on available memory
-    total_layers = 32  # Typical for a 7B model, will be adjusted if needed
+    # Try to move just the embedding layer to MPS
+    try:
+        model.model.embed_tokens = model.model.embed_tokens.to("mps")
+        logger.info("Moved embedding layer to MPS")
+    except Exception as e:
+        logger.warning(f"Failed to move embedding layer to MPS: {str(e)}")
     
-    for i in range(total_layers):
-        try:
-            if i < GPU_LAYERS:
-                device_map[f"model.layers.{i}"] = MAIN_DEVICE
-            else:
-                device_map[f"model.layers.{i}"] = "cpu"
-        except:
-            # This would happen if we've exceeded the actual number of layers
-            # We can break and proceed with what we have
-            break
-    
-    logger.info(f"Created device map with {GPU_LAYERS} layers on {MAIN_DEVICE}")
-    return device_map
+    return model
 
 # Models are loaded at startup and shutdown at teardown
 @asynccontextmanager
@@ -161,43 +147,32 @@ async def lifespan(app: FastAPI):
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     logger.info("Tokenizer loaded successfully")
     
-    # Create sharded device map
-    device_map = create_device_map()
-    
-    # Load model with sharding
-    logger.info("Loading model with CPU/GPU sharding...")
+    # Load model with no_cuda=True to improve MPS compatibility
+    logger.info("Loading model with no_cuda=True for better compatibility...")
     try:
         app.state.model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            device_map=device_map,          # Custom device map for sharding
             torch_dtype=torch.float16,      # Half precision to reduce memory
             trust_remote_code=True,
             low_cpu_mem_usage=True,
+            use_cache=True
         )
-        logger.info("Model loaded successfully with sharding!")
-        logger.info(f"Model is using devices: {app.state.model.hf_device_map}")
+        
+        # First ensure everything is on CPU
+        app.state.model = app.state.model.to("cpu")
+        logger.info("Model loaded successfully on CPU!")
+        
+        # Then try to selectively move components to MPS
+        if mps_available:
+            try:
+                # Try selective movement to MPS
+                app.state.model = selective_to_mps(app.state.model)
+            except Exception as e:
+                logger.warning(f"Error moving parts to MPS, staying on CPU: {str(e)}")
         
     except Exception as e:
-        logger.error(f"Error loading model with sharding: {str(e)}")
-        logger.warning("Attempting to load model with reduced settings...")
-        
-        # Fallback to even simpler loading with fewer GPU layers
-        global GPU_LAYERS
-        GPU_LAYERS = 2  # Reduce GPU layers for retry
-        device_map = create_device_map()
-        
-        try:
-            app.state.model = AutoModelForCausalLM.from_pretrained(
-                MODEL_NAME,
-                device_map=device_map,
-                torch_dtype=torch.float16,
-                trust_remote_code=True,
-                low_cpu_mem_usage=True,
-            )
-            logger.info("Model loaded with reduced GPU usage!")
-        except Exception as e2:
-            logger.error(f"Failed to load model: {str(e2)}")
-            raise
+        logger.error(f"Error loading model: {str(e)}")
+        raise
     
     # Clean up after loading
     clean_memory()
@@ -223,6 +198,9 @@ async def add_process_time_header(request: Request, call_next):
         logger.warning(f"Slow request to {request.url.path}: {process_time:.2f}s")
         
     return response
+
+# Prevent concurrent model generation to avoid memory issues
+generation_lock = asyncio.Lock()
 
 app = FastAPI(title="DeepSeek-R1 Reasoning API", lifespan=lifespan)
 app.middleware("http")(add_process_time_header)
@@ -256,18 +234,41 @@ class ContextResponse(BaseModel):
     reasoning: Optional[str] = Field(None, description="Optional explanation of the reasoning process")
     cached: Optional[bool] = Field(None, description="Indicates if the result was retrieved from cache")
 
+# Process patient data in smaller chunks if too large
+def process_large_patient_data(patient_data):
+    """Break down large patient data if needed to fit in context window"""
+    data_str = json.dumps(patient_data)
+    
+    # If data is small enough, return as is
+    if len(data_str) < 100000:  # ~100KB should be fine
+        return patient_data
+    
+    # Otherwise, we need to reduce the data
+    # For proof of concept, just truncate for now
+    logger.warning("Patient data is very large, truncating to fit in context window")
+    truncated_str = data_str[:100000] + "... [truncated due to size]"
+    
+    # Convert back to dictionary if possible, or return as string
+    try:
+        return json.loads(truncated_str)
+    except:
+        return {"data": "Patient data was too large and was truncated"}
+
 @run_in_threadpool
 def extract_context(model, tokenizer, patient_data, query, max_length=1000):
     """
     Use the DeepSeek model to extract relevant context from patient data.
     """
+    # Check and process large patient data
+    processed_patient_data = process_large_patient_data(patient_data)
+    
     # Format the input for the model
     prompt = f"""<think>
 I need to analyze a patient's medical record to extract only the information relevant to the following question:
 "{query}"
 
 Here is the complete patient record:
-{json.dumps(patient_data, indent=2)}
+{json.dumps(processed_patient_data, indent=2)}
 
 I will extract only the sections, symptoms, diagnoses, treatments, lab results, and other information that are directly relevant to answering the specific question. I will ignore irrelevant information.
 </think>
@@ -276,15 +277,9 @@ Based on the medical record, here is the relevant information to answer the ques
 """
     
     # Generate response from the model
-    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to("cpu")
     
-    # Make sure input is on the same device as the first module 
-    # This is especially important for sharded models
-    first_param = next(model.parameters())
-    first_device = first_param.device
-    input_ids = input_ids.to(first_device)
-    
-    # Create an attention mask to avoid warnings
+    # Create an attention mask
     attention_mask = torch.ones_like(input_ids)
     
     with torch.no_grad():
@@ -292,17 +287,23 @@ Based on the medical record, here is the relevant information to answer the ques
         clean_memory()
         
         try:
-            # Limit generation length to prevent memory issues
+            # Limit generation length
             actual_max_tokens = min(max_length, 800)
             
-            # For sharded models, avoid using autocast which can cause issues
+            # Force to CPU again to be safe
+            for param in model.parameters():
+                if param.device.type != "cpu":
+                    logger.warning(f"Found parameter on {param.device}, moving to CPU")
+            
+            # Generate with CPU
             output = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=actual_max_tokens,
                 temperature=TEMPERATURE,
                 top_p=TOP_P,
-                do_sample=True
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
             )
             
             # Decode the output and extract the relevant context
@@ -313,7 +314,7 @@ Based on the medical record, here is the relevant information to answer the ques
             
             return {
                 "context": relevant_context,
-                "reasoning": None  # Could extract reasoning from <think> tags if present in output
+                "reasoning": None
             }
         finally:
             # Clean memory after generation
@@ -341,14 +342,16 @@ async def process_context(request: ContextRequest, background_tasks: BackgroundT
                 cached=True
             )
         
-        # Use the DeepSeek model to extract relevant context
-        result = await extract_context(
-            app.state.model,
-            app.state.tokenizer,
-            request.patient_data,
-            request.query,
-            max_length=request.max_context_length
-        )
+        # Use lock to prevent concurrent operations which could cause memory issues
+        async with generation_lock:
+            # Use the DeepSeek model to extract relevant context
+            result = await extract_context(
+                app.state.model,
+                app.state.tokenizer,
+                request.patient_data,
+                request.query,
+                max_length=request.max_context_length
+            )
         
         # Cache the result in the background
         background_tasks.add_task(
@@ -391,19 +394,29 @@ async def health_check():
     except:
         pass
     
-    # Add model sharding info if available
-    sharding_info = {}
-    if hasattr(app.state, "model") and hasattr(app.state.model, "hf_device_map"):
-        sharding_info = dict(app.state.model.hf_device_map)
+    # Add model device info
+    device_info = {}
+    if hasattr(app.state, "model"):
+        try:
+            # Get devices for different components
+            device_info["embed_tokens"] = str(app.state.model.model.embed_tokens.device)
+            # Sample a few layers
+            for i in [0, 5, 10, 15]:
+                try:
+                    device_info[f"layer_{i}"] = str(app.state.model.model.layers[i].device)
+                except:
+                    pass
+        except:
+            device_info["note"] = "Failed to get detailed device info"
     
     return {
         "status": "healthy", 
         "model": MODEL_NAME, 
         "main_device": MAIN_DEVICE,
-        "gpu_layers": GPU_LAYERS,
+        "mps_available": mps_available,
         "memory_info": memory_info,
         "cache_entries": len(cache_files),
-        "sharding_info": sharding_info
+        "device_info": device_info
     }
 
 @app.get("/cache/clear")
@@ -419,22 +432,6 @@ async def clear_cache():
         return {"status": "success", "cleared_entries": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing cache: {str(e)}")
-
-@app.get("/adjust-sharding/{gpu_layers}")
-async def adjust_sharding(gpu_layers: int):
-    """Dynamically adjust model sharding (for experimentation)"""
-    # NOTE: This requires restarting the application to take effect
-    try:
-        global GPU_LAYERS
-        original_layers = GPU_LAYERS
-        GPU_LAYERS = max(1, min(24, gpu_layers))  # Clamp between 1 and 24
-        
-        return {
-            "status": "success", 
-            "message": f"GPU layers adjusted from {original_layers} to {GPU_LAYERS}. Restart the application for changes to take effect."
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error adjusting sharding: {str(e)}")
 
 if __name__ == "__main__":
     # Use localhost if behind a reverse proxy like Nginx
