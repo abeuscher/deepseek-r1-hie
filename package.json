@@ -15,6 +15,7 @@
     "install": "bash install.sh",
     "optimize": "bash deepseek-optimize.sh",
     "install-full": "bash install.sh && bash deepseek-optimize.sh",
+    "uninstall": "bash uninstall.sh",
     
     "logs": "cat ~/deepseek-app/logs/deepseek.log",
     "logs:error": "cat ~/deepseek-app/logs/deepseek-error.log",
