@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List, Union
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import gc
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import json
 import uvicorn
 import os
@@ -31,9 +32,9 @@ MAX_NEW_TOKENS = 1024
 TEMPERATURE = 0.6
 TOP_P = 0.95
 
-# Force CPU mode to ensure stability
+# Force CPU mode with quantization to ensure stability
 DEVICE = "cpu"
-logger.info("Using CPU for inference (forced mode for stability)")
+logger.info("Using CPU for inference with 8-bit quantization")
 
 # Optimize CPU threads for performance
 torch.set_num_threads(max(1, os.cpu_count() - 1))
@@ -82,6 +83,12 @@ def save_to_cache(patient_data, query, max_length, result):
     except Exception as e:
         logger.warning(f"Failed to save to cache: {str(e)}")
 
+# Clean up memory
+def clean_memory():
+    """Force garbage collection and clear CUDA cache if available"""
+    gc.collect()
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
 # Run CPU-intensive tasks in a thread pool
 def run_in_threadpool(func):
     @functools.wraps(func)
@@ -98,25 +105,64 @@ async def lifespan(app: FastAPI):
     # Load model and tokenizer on startup
     logger.info(f"Loading model {MODEL_NAME}...")
     
+    # Clean up before loading
+    clean_memory()
+    
     logger.info(f"Downloading model from Hugging Face: {MODEL_NAME}")
     # Ensure the directory exists
     os.makedirs(MODEL_PATH, exist_ok=True)
     
-    # Download with memory-efficient settings
+    # Download the tokenizer
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    logger.info("Tokenizer loaded successfully")
     
-    # Simplified CPU-specific model loading
-    logger.info("Loading model on CPU with basic settings")
-    app.state.model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME,
-        trust_remote_code=True,
-        low_cpu_mem_usage=True,
-        torch_dtype=torch.float32  # Use float32 for CPU
+    # Configure 8-bit quantization
+    logger.info("Configuring 8-bit quantization for reduced memory usage")
+    quantization_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_threshold=6.0,
+        llm_int8_skip_modules=None,
+        llm_int8_enable_fp32_cpu_offload=True,
     )
     
-    # Move model to CPU explicitly
-    app.state.model = app.state.model.to("cpu")
-    logger.info(f"Model loaded successfully on {DEVICE}!")
+    # Load model with 8-bit quantization
+    logger.info("Loading model with 8-bit quantization...")
+    try:
+        app.state.model = AutoModelForCausalLM.from_pretrained(
+            MODEL_NAME,
+            trust_remote_code=True,
+            quantization_config=quantization_config,
+            low_cpu_mem_usage=True,
+        )
+        logger.info("Model loaded successfully with 8-bit quantization!")
+    except Exception as e:
+        # Fallback to 4-bit if 8-bit fails
+        logger.warning(f"8-bit quantization failed: {str(e)}. Trying 4-bit...")
+        clean_memory()
+        
+        # 4-bit config
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float32,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        
+        try:
+            app.state.model = AutoModelForCausalLM.from_pretrained(
+                MODEL_NAME,
+                trust_remote_code=True,
+                quantization_config=quantization_config,
+                low_cpu_mem_usage=True,
+            )
+            logger.info("Model loaded successfully with 4-bit quantization!")
+        except Exception as e2:
+            # Last resort: try to load a smaller model
+            logger.error(f"4-bit quantization also failed: {str(e2)}. Your system may not have enough resources.")
+            raise
+    
+    # Clean up after loading
+    clean_memory()
     
     yield
     
@@ -124,6 +170,7 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down and cleaning up...")
     del app.state.model
     del app.state.tokenizer
+    clean_memory()
 
 # Add performance middleware
 async def add_process_time_header(request: Request, call_next):
@@ -191,31 +238,41 @@ Based on the medical record, here is the relevant information to answer the ques
 """
     
     # Generate response from the model
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to("cpu")
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(DEVICE)
     
     # Create an attention mask to avoid warnings
     attention_mask = torch.ones_like(input_ids)
     
     with torch.no_grad():
-        output = model.generate(
-            input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=max_length,
-            temperature=TEMPERATURE,
-            top_p=TOP_P,
-            do_sample=True
-        )
-    
-    # Decode the output and extract the relevant context
-    full_output = tokenizer.decode(output[0], skip_special_tokens=True)
-    
-    # Extract only the generated part (after the prompt)
-    relevant_context = full_output[len(prompt):].strip()
-    
-    return {
-        "context": relevant_context,
-        "reasoning": None  # Could extract reasoning from <think> tags if present in output
-    }
+        # Clean memory before generation
+        clean_memory()
+        
+        try:
+            # Set smaller max_new_tokens if input is large
+            actual_max_tokens = min(max_length, 800)  # Limit to prevent memory issues
+            
+            output = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=actual_max_tokens,
+                temperature=TEMPERATURE,
+                top_p=TOP_P,
+                do_sample=True
+            )
+            
+            # Decode the output and extract the relevant context
+            full_output = tokenizer.decode(output[0], skip_special_tokens=True)
+            
+            # Extract only the generated part (after the prompt)
+            relevant_context = full_output[len(prompt):].strip()
+            
+            return {
+                "context": relevant_context,
+                "reasoning": None  # Could extract reasoning from <think> tags if present in output
+            }
+        finally:
+            # Clean memory after generation
+            clean_memory()
 
 @app.post("/process-context", response_model=ContextResponse)
 async def process_context(request: ContextRequest, background_tasks: BackgroundTasks):
@@ -272,17 +329,29 @@ async def health_check():
     # Get cache stats
     cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
     
-    # Get system info
-    system_info = {
+    # Get memory info
+    memory_info = {
         "cpu_threads": torch.get_num_threads(),
         "processor_count": os.cpu_count()
     }
+    
+    # Get free RAM using system command
+    try:
+        import subprocess
+        mem_info = subprocess.check_output(['vm_stat']).decode('utf-8')
+        for line in mem_info.split('\n'):
+            if 'Pages free' in line:
+                free_pages = int(line.split(':')[1].strip()[:-1]) * 4096
+                memory_info["free_memory_mb"] = free_pages / (1024 * 1024)
+    except:
+        pass
     
     return {
         "status": "healthy", 
         "model": MODEL_NAME, 
         "device": DEVICE,
-        "system_info": system_info,
+        "quantization": "8-bit",
+        "memory_info": memory_info,
         "cache_entries": len(cache_files)
     }
 
@@ -303,4 +372,4 @@ async def clear_cache():
 if __name__ == "__main__":
     # Use localhost if behind a reverse proxy like Nginx
     host = "127.0.0.1" if os.path.exists("/etc/nginx/sites-enabled/deepseek") else "0.0.0.0"
-    uvicorn.run("app:app", host=host, port=8000, reload=False)
+    uvicorn.run("app:app", host=host, port=8000, log_level="info", reload=False)
