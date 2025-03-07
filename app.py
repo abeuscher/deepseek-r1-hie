@@ -105,16 +105,17 @@ async def lifespan(app: FastAPI):
     # Download with memory-efficient settings
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     
-    # CPU-specific model loading with memory optimizations
-    model_kwargs = {
-        "pretrained_model_name_or_path": MODEL_NAME,
-        "trust_remote_code": True,
-        "low_cpu_mem_usage": True,
-        "offload_folder": "offload",
-        "device_map": "auto"  # Auto with CPU will distribute efficiently
-    }
+    # Simplified CPU-specific model loading
+    logger.info("Loading model on CPU with basic settings")
+    app.state.model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+        torch_dtype=torch.float32  # Use float32 for CPU
+    )
     
-    app.state.model = AutoModelForCausalLM.from_pretrained(**model_kwargs)
+    # Move model to CPU explicitly
+    app.state.model = app.state.model.to("cpu")
     logger.info(f"Model loaded successfully on {DEVICE}!")
     
     yield
@@ -190,10 +191,7 @@ Based on the medical record, here is the relevant information to answer the ques
 """
     
     # Generate response from the model
-    input_ids = tokenizer.encode(prompt, return_tensors="pt")
-    
-    # Make sure input is on CPU
-    input_ids = input_ids.to(DEVICE)
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to("cpu")
     
     # Create an attention mask to avoid warnings
     attention_mask = torch.ones_like(input_ids)
@@ -201,7 +199,7 @@ Based on the medical record, here is the relevant information to answer the ques
     with torch.no_grad():
         output = model.generate(
             input_ids,
-            attention_mask=attention_mask,  # Add attention mask
+            attention_mask=attention_mask,
             max_new_tokens=max_length,
             temperature=TEMPERATURE,
             top_p=TOP_P,
