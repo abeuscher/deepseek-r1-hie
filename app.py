@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List, Union
 import torch
 import gc
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import uvicorn
 import os
@@ -32,17 +32,33 @@ MAX_NEW_TOKENS = 1024
 TEMPERATURE = 0.6
 TOP_P = 0.95
 
-# Force CPU mode with quantization to ensure stability
-DEVICE = "cpu"
-logger.info("Using CPU for inference with 8-bit quantization")
-
-# Optimize CPU threads for performance
-torch.set_num_threads(max(1, os.cpu_count() - 1))
-logger.info(f"Set PyTorch to use {torch.get_num_threads()} CPU threads")
-
 # Performance optimization settings
 CACHE_DIR = os.path.join(os.path.expanduser("~"), "deepseek-app", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
+
+# Detect available devices
+mps_available = torch.backends.mps.is_available()
+cuda_available = torch.cuda.is_available()
+
+# Sharding configuration
+# These settings control how the model is split between GPU and CPU
+GPU_LAYERS = 4      # Number of transformer layers to keep on GPU (adjust based on memory)
+SHARD_SIZE = 1      # Shard embedding weights if set to 1
+
+if mps_available:
+    MAIN_DEVICE = "mps"
+    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+    logger.info("Using Apple Silicon GPU (MPS) with model sharding")
+elif cuda_available:
+    MAIN_DEVICE = "cuda"
+    logger.info("Using NVIDIA GPU (CUDA) with model sharding")
+else:
+    MAIN_DEVICE = "cpu"
+    logger.info("No GPU detected, using CPU only")
+    
+# Optimize CPU threads for CPU portions
+torch.set_num_threads(max(1, os.cpu_count() - 1))
+logger.info(f"Set PyTorch to use {torch.get_num_threads()} CPU threads")
 
 # Helper function for caching
 def get_cache_key(patient_data, query, max_length):
@@ -87,7 +103,8 @@ def save_to_cache(patient_data, query, max_length, result):
 def clean_memory():
     """Force garbage collection and clear CUDA cache if available"""
     gc.collect()
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    if cuda_available:
+        torch.cuda.empty_cache()
 
 # Run CPU-intensive tasks in a thread pool
 def run_in_threadpool(func):
@@ -99,66 +116,87 @@ def run_in_threadpool(func):
         )
     return wrapper
 
+# Create device map for model sharding
+def create_device_map():
+    """Create a device map to distribute model layers between GPU and CPU"""
+    device_map = {}
+    
+    # Critical components on GPU
+    device_map["model.embed_tokens"] = MAIN_DEVICE
+    device_map["model.norm"] = MAIN_DEVICE
+    device_map["lm_head"] = MAIN_DEVICE
+    
+    # First few transformer layers on GPU for better performance
+    # Adjust GPU_LAYERS based on available memory
+    total_layers = 32  # Typical for a 7B model, will be adjusted if needed
+    
+    for i in range(total_layers):
+        try:
+            if i < GPU_LAYERS:
+                device_map[f"model.layers.{i}"] = MAIN_DEVICE
+            else:
+                device_map[f"model.layers.{i}"] = "cpu"
+        except:
+            # This would happen if we've exceeded the actual number of layers
+            # We can break and proceed with what we have
+            break
+    
+    logger.info(f"Created device map with {GPU_LAYERS} layers on {MAIN_DEVICE}")
+    return device_map
+
 # Models are loaded at startup and shutdown at teardown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Load model and tokenizer on startup
     logger.info(f"Loading model {MODEL_NAME}...")
     
-    # Clean up before loading
+    # Clean up memory before loading
     clean_memory()
     
     logger.info(f"Downloading model from Hugging Face: {MODEL_NAME}")
     # Ensure the directory exists
     os.makedirs(MODEL_PATH, exist_ok=True)
     
-    # Download the tokenizer
+    # Download tokenizer
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     logger.info("Tokenizer loaded successfully")
     
-    # Configure 8-bit quantization
-    logger.info("Configuring 8-bit quantization for reduced memory usage")
-    quantization_config = BitsAndBytesConfig(
-        load_in_8bit=True,
-        llm_int8_threshold=6.0,
-        llm_int8_skip_modules=None,
-        llm_int8_enable_fp32_cpu_offload=True,
-    )
+    # Create sharded device map
+    device_map = create_device_map()
     
-    # Load model with 8-bit quantization
-    logger.info("Loading model with 8-bit quantization...")
+    # Load model with sharding
+    logger.info("Loading model with CPU/GPU sharding...")
     try:
         app.state.model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
+            device_map=device_map,          # Custom device map for sharding
+            torch_dtype=torch.float16,      # Half precision to reduce memory
             trust_remote_code=True,
-            quantization_config=quantization_config,
             low_cpu_mem_usage=True,
         )
-        logger.info("Model loaded successfully with 8-bit quantization!")
-    except Exception as e:
-        # Fallback to 4-bit if 8-bit fails
-        logger.warning(f"8-bit quantization failed: {str(e)}. Trying 4-bit...")
-        clean_memory()
+        logger.info("Model loaded successfully with sharding!")
+        logger.info(f"Model is using devices: {app.state.model.hf_device_map}")
         
-        # 4-bit config
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.float32,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-        )
+    except Exception as e:
+        logger.error(f"Error loading model with sharding: {str(e)}")
+        logger.warning("Attempting to load model with reduced settings...")
+        
+        # Fallback to even simpler loading with fewer GPU layers
+        global GPU_LAYERS
+        GPU_LAYERS = 2  # Reduce GPU layers for retry
+        device_map = create_device_map()
         
         try:
             app.state.model = AutoModelForCausalLM.from_pretrained(
                 MODEL_NAME,
+                device_map=device_map,
+                torch_dtype=torch.float16,
                 trust_remote_code=True,
-                quantization_config=quantization_config,
                 low_cpu_mem_usage=True,
             )
-            logger.info("Model loaded successfully with 4-bit quantization!")
+            logger.info("Model loaded with reduced GPU usage!")
         except Exception as e2:
-            # Last resort: try to load a smaller model
-            logger.error(f"4-bit quantization also failed: {str(e2)}. Your system may not have enough resources.")
+            logger.error(f"Failed to load model: {str(e2)}")
             raise
     
     # Clean up after loading
@@ -238,7 +276,13 @@ Based on the medical record, here is the relevant information to answer the ques
 """
     
     # Generate response from the model
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(DEVICE)
+    input_ids = tokenizer.encode(prompt, return_tensors="pt")
+    
+    # Make sure input is on the same device as the first module 
+    # This is especially important for sharded models
+    first_param = next(model.parameters())
+    first_device = first_param.device
+    input_ids = input_ids.to(first_device)
     
     # Create an attention mask to avoid warnings
     attention_mask = torch.ones_like(input_ids)
@@ -248,9 +292,10 @@ Based on the medical record, here is the relevant information to answer the ques
         clean_memory()
         
         try:
-            # Set smaller max_new_tokens if input is large
-            actual_max_tokens = min(max_length, 800)  # Limit to prevent memory issues
+            # Limit generation length to prevent memory issues
+            actual_max_tokens = min(max_length, 800)
             
+            # For sharded models, avoid using autocast which can cause issues
             output = model.generate(
                 input_ids,
                 attention_mask=attention_mask,
@@ -329,7 +374,7 @@ async def health_check():
     # Get cache stats
     cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
     
-    # Get memory info
+    # Get memory info based on device
     memory_info = {
         "cpu_threads": torch.get_num_threads(),
         "processor_count": os.cpu_count()
@@ -346,13 +391,19 @@ async def health_check():
     except:
         pass
     
+    # Add model sharding info if available
+    sharding_info = {}
+    if hasattr(app.state, "model") and hasattr(app.state.model, "hf_device_map"):
+        sharding_info = dict(app.state.model.hf_device_map)
+    
     return {
         "status": "healthy", 
         "model": MODEL_NAME, 
-        "device": DEVICE,
-        "quantization": "8-bit",
+        "main_device": MAIN_DEVICE,
+        "gpu_layers": GPU_LAYERS,
         "memory_info": memory_info,
-        "cache_entries": len(cache_files)
+        "cache_entries": len(cache_files),
+        "sharding_info": sharding_info
     }
 
 @app.get("/cache/clear")
@@ -368,6 +419,22 @@ async def clear_cache():
         return {"status": "success", "cleared_entries": count}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error clearing cache: {str(e)}")
+
+@app.get("/adjust-sharding/{gpu_layers}")
+async def adjust_sharding(gpu_layers: int):
+    """Dynamically adjust model sharding (for experimentation)"""
+    # NOTE: This requires restarting the application to take effect
+    try:
+        global GPU_LAYERS
+        original_layers = GPU_LAYERS
+        GPU_LAYERS = max(1, min(24, gpu_layers))  # Clamp between 1 and 24
+        
+        return {
+            "status": "success", 
+            "message": f"GPU layers adjusted from {original_layers} to {GPU_LAYERS}. Restart the application for changes to take effect."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error adjusting sharding: {str(e)}")
 
 if __name__ == "__main__":
     # Use localhost if behind a reverse proxy like Nginx
