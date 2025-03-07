@@ -31,41 +31,17 @@ MAX_NEW_TOKENS = 1024
 TEMPERATURE = 0.6
 TOP_P = 0.95
 
-# Device strategy: "cpu", "gpu", or "hybrid"
-DEVICE_STRATEGY = "hybrid"
+# Force CPU mode to ensure stability
+DEVICE = "cpu"
+logger.info("Using CPU for inference (forced mode for stability)")
+
+# Optimize CPU threads for performance
+torch.set_num_threads(max(1, os.cpu_count() - 1))
+logger.info(f"Set PyTorch to use {torch.get_num_threads()} CPU threads")
 
 # Performance optimization settings
 CACHE_DIR = os.path.join(os.path.expanduser("~"), "deepseek-app", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
-
-# Configure device based on strategy and available hardware
-if torch.backends.mps.is_available() and DEVICE_STRATEGY != "cpu":
-    # Enable Metal Performance Shaders optimizations
-    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-    
-    if DEVICE_STRATEGY == "hybrid":
-        logger.info("Using hybrid CPU+MPS strategy for optimal performance and memory usage")
-        # We'll configure a hybrid device map later, but use MPS for input tensors
-        DEVICE = "mps"
-    else:
-        logger.info("Using Apple Silicon GPU (MPS) for inference")
-        DEVICE = "mps"
-elif torch.cuda.is_available() and DEVICE_STRATEGY != "cpu":
-    DEVICE = "cuda"
-    # Enable TF32 for better performance on NVIDIA GPUs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    if hasattr(torch.backends.cudnn, "allow_tf32"):
-        torch.backends.cudnn.allow_tf32 = True
-    
-    if DEVICE_STRATEGY == "hybrid":
-        logger.info("Using hybrid CPU+CUDA strategy for optimal performance and memory usage")
-    else:
-        logger.info("Using NVIDIA GPU (CUDA) for inference")
-else:
-    DEVICE = "cpu"
-    # Optimize CPU threads
-    torch.set_num_threads(max(1, os.cpu_count() - 1))
-    logger.info("Using CPU for inference")
 
 # Helper function for caching
 def get_cache_key(patient_data, query, max_length):
@@ -106,12 +82,6 @@ def save_to_cache(patient_data, query, max_length, result):
     except Exception as e:
         logger.warning(f"Failed to save to cache: {str(e)}")
 
-# Background task to clean up GPU memory
-async def cleanup_gpu_memory():
-    """Clean up GPU memory after request processing"""
-    if DEVICE == "cuda":
-        torch.cuda.empty_cache()
-
 # Run CPU-intensive tasks in a thread pool
 def run_in_threadpool(func):
     @functools.wraps(func)
@@ -135,78 +105,17 @@ async def lifespan(app: FastAPI):
     # Download with memory-efficient settings
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     
-    # Choose model loading strategy based on device strategy
-    if DEVICE_STRATEGY == "hybrid" and (torch.backends.mps.is_available() or torch.cuda.is_available()):
-        logger.info("Configuring hybrid device map for model layers...")
-        
-        # Configure device map for layer distribution
-        device_map = {
-            "model.embed_tokens": DEVICE,
-            "model.norm": DEVICE,
-            "lm_head": DEVICE
-        }
-        
-        # Determine total number of layers (usually 24-32 for 7B models)
-        total_layers = 32  # Conservative estimate, will be adjusted if needed
-        
-        # For MPS, keep a smaller number of layers on GPU to avoid memory issues
-        # For CUDA, we can usually use more GPU layers
-        if DEVICE == "mps":
-            gpu_layers = 6  # Reduced from 8 to avoid memory issues on M1/M2/M4
-        else:  # CUDA
-            gpu_layers = 12
-            
-        # Distribute layers between GPU and CPU
-        for i in range(total_layers):
-            try:
-                if i < gpu_layers:
-                    # First layers on GPU
-                    device_map[f"model.layers.{i}"] = DEVICE
-                else:
-                    # Remaining layers on CPU
-                    device_map[f"model.layers.{i}"] = "cpu"
-            except Exception as e:
-                # This would happen if we've exceeded the actual number of layers
-                # We can ignore this and move on
-                break
-                
-        # Load model with the hybrid device map
-        app.state.model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            device_map=device_map,
-            torch_dtype=torch.float16,
-            trust_remote_code=True,
-            low_cpu_mem_usage=True,
-            offload_folder="offload"
-        )
-    else:
-        # Standard loading based on device
-        model_kwargs = {
-            "pretrained_model_name_or_path": MODEL_NAME,
-            "trust_remote_code": True,
-            "low_cpu_mem_usage": True,
-            "offload_folder": "offload"
-        }
-        
-        if DEVICE == "cuda":
-            model_kwargs.update({
-                "device_map": "auto",
-                "torch_dtype": torch.float16
-            })
-        elif DEVICE == "mps":
-            model_kwargs.update({
-                "device_map": DEVICE,
-                "torch_dtype": torch.float16
-            })
-        else:
-            # CPU optimizations
-            model_kwargs.update({
-                "device_map": "auto"
-            })
-        
-        app.state.model = AutoModelForCausalLM.from_pretrained(**model_kwargs)
+    # CPU-specific model loading with memory optimizations
+    model_kwargs = {
+        "pretrained_model_name_or_path": MODEL_NAME,
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+        "offload_folder": "offload",
+        "device_map": "auto"  # Auto with CPU will distribute efficiently
+    }
     
-    logger.info("Model loaded successfully!")
+    app.state.model = AutoModelForCausalLM.from_pretrained(**model_kwargs)
+    logger.info(f"Model loaded successfully on {DEVICE}!")
     
     yield
     
@@ -214,8 +123,6 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down and cleaning up...")
     del app.state.model
     del app.state.tokenizer
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
 
 # Add performance middleware
 async def add_process_time_header(request: Request, call_next):
@@ -285,96 +192,32 @@ Based on the medical record, here is the relevant information to answer the ques
     # Generate response from the model
     input_ids = tokenizer.encode(prompt, return_tensors="pt")
     
-    # Make sure input is on the same device as the model's first module
-    # For hybrid setups, this should typically be GPU (embed_tokens)
-    first_device = next(model.parameters()).device
-    input_ids = input_ids.to(first_device)
+    # Make sure input is on CPU
+    input_ids = input_ids.to(DEVICE)
     
-    try:
-        with torch.no_grad():
-            # For hybrid setups, don't use autocast as it can cause issues with split devices
-            if DEVICE_STRATEGY == "hybrid":
-                output = model.generate(
-                    input_ids,
-                    max_new_tokens=max_length,
-                    temperature=TEMPERATURE,
-                    top_p=TOP_P,
-                    do_sample=True
-                )
-            # For full GPU, use autocast
-            elif DEVICE == "mps" or DEVICE == "cuda":
-                with torch.autocast(device_type=DEVICE):
-                    output = model.generate(
-                        input_ids,
-                        max_new_tokens=max_length,
-                        temperature=TEMPERATURE,
-                        top_p=TOP_P,
-                        do_sample=True
-                    )
-            # For CPU, no autocast needed
-            else:
-                output = model.generate(
-                    input_ids,
-                    max_new_tokens=max_length,
-                    temperature=TEMPERATURE,
-                    top_p=TOP_P,
-                    do_sample=True
-                )
-        
-        # Decode the output and extract the relevant context
-        full_output = tokenizer.decode(output[0], skip_special_tokens=True)
-        
-        # Extract only the generated part (after the prompt)
-        relevant_context = full_output[len(prompt):].strip()
-        
-        return {
-            "context": relevant_context,
-            "reasoning": None  # Could extract reasoning from <think> tags if present in output
-        }
-    except RuntimeError as e:
-        # If we encounter a memory error, fall back to CPU
-        if "out of memory" in str(e):
-            logger.warning("GPU out of memory. Falling back to CPU for this request.")
-            # Move input to CPU
-            input_ids = input_ids.to("cpu")
-            
-            # Temporarily move model to CPU for this generation
-            device_map_backup = getattr(model, "hf_device_map", None)
-            
-            try:
-                # Set all parameters to CPU temporarily
-                model.to("cpu")
-                
-                with torch.no_grad():
-                    output = model.generate(
-                        input_ids,
-                        max_new_tokens=max_length,
-                        temperature=TEMPERATURE,
-                        top_p=TOP_P,
-                        do_sample=True
-                    )
-                    
-                full_output = tokenizer.decode(output[0], skip_special_tokens=True)
-                relevant_context = full_output[len(prompt):].strip()
-                
-                return {
-                    "context": relevant_context,
-                    "reasoning": None
-                }
-            finally:
-                # Restore device map if we had one
-                if device_map_backup is not None and DEVICE_STRATEGY == "hybrid":
-                    # This will restore the original device mapping
-                    # In most cases a restart is cleaner, but this allows recovery
-                    for name, device in device_map_backup.items():
-                        try:
-                            module = model.get_submodule(name)
-                            module.to(device)
-                        except:
-                            pass
-        
-        # Re-raise other exceptions
-        raise
+    # Create an attention mask to avoid warnings
+    attention_mask = torch.ones_like(input_ids)
+    
+    with torch.no_grad():
+        output = model.generate(
+            input_ids,
+            attention_mask=attention_mask,  # Add attention mask
+            max_new_tokens=max_length,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            do_sample=True
+        )
+    
+    # Decode the output and extract the relevant context
+    full_output = tokenizer.decode(output[0], skip_special_tokens=True)
+    
+    # Extract only the generated part (after the prompt)
+    relevant_context = full_output[len(prompt):].strip()
+    
+    return {
+        "context": relevant_context,
+        "reasoning": None  # Could extract reasoning from <think> tags if present in output
+    }
 
 @app.post("/process-context", response_model=ContextResponse)
 async def process_context(request: ContextRequest, background_tasks: BackgroundTasks):
@@ -416,9 +259,6 @@ async def process_context(request: ContextRequest, background_tasks: BackgroundT
             result
         )
         
-        # Add cleanup task
-        background_tasks.add_task(cleanup_gpu_memory)
-        
         return ContextResponse(
             relevant_context=result["context"],
             reasoning=result.get("reasoning"),
@@ -431,31 +271,20 @@ async def process_context(request: ContextRequest, background_tasks: BackgroundT
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint."""
-    memory_info = {}
-    
-    # Get memory info based on device
-    if DEVICE == "cuda" and torch.cuda.is_available():
-        memory_info = {
-            "total": torch.cuda.get_device_properties(0).total_memory / (1024**3),
-            "reserved": torch.cuda.memory_reserved(0) / (1024**3),
-            "allocated": torch.cuda.memory_allocated(0) / (1024**3)
-        }
-    elif DEVICE == "mps" and torch.backends.mps.is_available():
-        # No direct memory query API for MPS, but we can add device_strategy
-        memory_info = {
-            "note": "MPS memory stats not available",
-            "device_strategy": DEVICE_STRATEGY
-        }
-    
     # Get cache stats
     cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
+    
+    # Get system info
+    system_info = {
+        "cpu_threads": torch.get_num_threads(),
+        "processor_count": os.cpu_count()
+    }
     
     return {
         "status": "healthy", 
         "model": MODEL_NAME, 
         "device": DEVICE,
-        "device_strategy": DEVICE_STRATEGY,
-        "memory_info": memory_info,
+        "system_info": system_info,
         "cache_entries": len(cache_files)
     }
 
