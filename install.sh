@@ -138,6 +138,23 @@ mkdir -p ~/deepseek-app/logs
 echo "Installing the API service..."
 cp app.py ~/deepseek-app/api/
 
+# This is a patch to be added to the existing install.sh script
+# Add this code after the section where app.py is copied to the installation directory
+
+# Create modules directory
+echo "Setting up modular structure..."
+mkdir -p ~/deepseek-app/api/modules
+
+# Copy module files
+echo "Installing module files..."
+cp modules/*.py ~/deepseek-app/api/modules/
+
+# Install additional dependency
+echo "Installing additional dependencies..."
+~/deepseek-app/venv/bin/pip install psutil
+
+# This ends the patch section
+
 # Start the service
 echo "Starting the DeepSeek-R1 service..."
 setup_service
