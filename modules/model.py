@@ -32,13 +32,15 @@ def load_model(model_name):
         # Memory optimization settings
         logger.info("Loading model with memory optimizations...")
         
+        # In load_model function, update the model loading parameters:
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.float32,   # Full precision for stability
+            torch_dtype=torch.float16,   # Try half precision instead of float32
             trust_remote_code=True,
-            low_cpu_mem_usage=True,      # Enable low memory usage
-            offload_folder="offload",    # Setup offload folder for memory efficiency
-            device_map="cpu"             # Explicitly set to CPU
+            low_cpu_mem_usage=True,
+            offload_state_dict=True,     # Add this to offload state dict during loading
+            offload_folder="offload",
+            device_map="cpu"
         )
         
         # Ensure model is on CPU by iterating through all parameters

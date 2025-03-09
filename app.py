@@ -26,14 +26,16 @@ logger = logging.getLogger("deepseek-api")
 # Constants
 MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 
-# App lifespan for model loading/unloading
+# In app.py's lifespan function, add delays between loading steps:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Clean up on startup
     clean_memory()
+    time.sleep(1)  # Add a short delay
     
     # Make sure MPS is disabled
     disable_mps()
+    time.sleep(1)  # Add a short delay
     
     # Load model and tokenizer
     app.state.model, app.state.tokenizer = load_model(MODEL_NAME)
