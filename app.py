@@ -6,7 +6,14 @@ import os
 import sys
 import logging
 import time
+import torch
+import psutil
+import uvicorn
 from contextlib import asynccontextmanager
+
+# Force single-process behavior
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
 
 # Import our modules
 from modules.memory import clean_memory, get_memory_usage
@@ -26,7 +33,27 @@ logger = logging.getLogger("deepseek-api")
 # Constants
 MODEL_NAME = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
 
-# In app.py's lifespan function, add delays between loading steps:
+# Run resource cleanup at exit
+def cleanup_resources():
+    """Clean up resources explicitly"""
+    # Force garbage collection
+    import gc
+    gc.collect()
+    
+    # Close any open file handles
+    for fd in range(3, 1000):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    
+    logger.info("Resources cleaned up on exit")
+
+# Register the cleanup handler
+import atexit
+atexit.register(cleanup_resources)
+
+# App lifespan for model loading/unloading
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Clean up on startup
@@ -44,8 +71,10 @@ async def lifespan(app: FastAPI):
     
     # Clean up on shutdown
     logger.info("Shutting down and cleaning up...")
-    del app.state.model
-    del app.state.tokenizer
+    if hasattr(app.state, 'model'):
+        del app.state.model
+    if hasattr(app.state, 'tokenizer'):
+        del app.state.tokenizer
     app.state.model = None
     app.state.tokenizer = None
     clean_memory()
@@ -143,10 +172,6 @@ async def process_context(request: ContextRequest):
 @app.get("/health")
 async def health_check():
     """Simple health check endpoint."""
-    import os
-    import psutil
-    import torch
-    
     # Get cache stats
     cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
     
@@ -155,6 +180,19 @@ async def health_check():
     
     # Get system memory info
     system_mem = psutil.virtual_memory()
+    
+    # Get multiprocessing info
+    mp_info = {}
+    try:
+        current_process = psutil.Process()
+        children = current_process.children(recursive=True)
+        mp_info = {
+            "child_processes": len(children),
+            "open_files": len(current_process.open_files()) if hasattr(current_process, 'open_files') else -1,
+            "connections": len(current_process.connections()) if hasattr(current_process, 'connections') else -1,
+        }
+    except:
+        mp_info = {"error": "Could not get multiprocessing info"}
     
     return {
         "status": "healthy", 
@@ -167,6 +205,7 @@ async def health_check():
             "system_available_gb": system_mem.available / (1024**3),
             "system_percent": system_mem.percent
         },
+        "multiprocessing": mp_info,
         "cpu_threads": torch.get_num_threads(),
         "cache_entries": len(cache_files),
     }
@@ -196,8 +235,16 @@ if __name__ == "__main__":
     
     try:
         logger.info(f"Starting server on {host}:{port}")
-        import uvicorn
-        uvicorn.run("app:app", host=host, port=port, log_level="info", reload=False)
+        # Run with explicit single worker to avoid multiprocessing
+        uvicorn.run(
+            "app:app", 
+            host=host, 
+            port=port, 
+            log_level="info", 
+            reload=False,
+            workers=1,  # Enforce single process
+            loop="asyncio"
+        )
     except OSError as e:
         if "address already in use" in str(e).lower():
             logger.error(f"Port {port} is still in use despite termination attempts")
