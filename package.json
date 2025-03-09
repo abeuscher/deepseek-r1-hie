@@ -12,7 +12,7 @@
     "run-direct": "cd ~/deepseek-app/api && ~/deepseek-app/venv/bin/python3 app.py",
     "shell": "source ~/deepseek-app/venv/bin/activate",
     "run-app": "~/deepseek-app/venv/bin/python3 ~/deepseek-app/api/app.py",
-    "copy-app": "cp app.py ~/deepseek-app/api/app.py",
+    "copy-app": "cp app.py ~/deepseek-app/api/app.py && cp -r modules/* ~/deepseek-app/api/modules/",
     
     "install": "bash install.sh",
     "optimize": "bash deepseek-optimize.sh",
