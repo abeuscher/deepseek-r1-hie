@@ -115,24 +115,34 @@ class ContextResponse(BaseModel):
     """Response model with filtered context."""
     relevant_context: str = Field(..., description="The extracted relevant context from the patient data")
     cached: Optional[bool] = Field(None, description="Indicates if the result was retrieved from cache")
+    processing_time_seconds: Optional[float] = Field(None, description="Processing time in seconds")
 
 @app.post("/process-context", response_model=ContextResponse)
 async def process_context(request: ContextRequest):
     """Process patient data and extract relevant context for a specific query."""
+    start_time = time.time()
+    
     try:
         # Log memory at start of request
         mem_start = get_memory_usage()
         logger.info(f"Request started - Memory: {mem_start['rss_mb']:.1f}MB, {mem_start['percent']:.1f}%")
         
+        # Record timing for each phase
+        phase_timings = {}
+        
         # Check cache first
+        cache_start = time.time()
         cached_result = get_cached_result(
             request.patient_data, 
             request.query, 
             request.max_context_length
         )
+        phase_timings["cache_check"] = time.time() - cache_start
         
         if cached_result:
-            logger.info("Returning cached result")
+            end_time = time.time()
+            total_time = end_time - start_time
+            logger.info(f"Returning cached result - Total time: {total_time:.2f} seconds")
             return ContextResponse(
                 relevant_context=cached_result["context"],
                 cached=True
@@ -140,6 +150,9 @@ async def process_context(request: ContextRequest):
         
         # Use the DeepSeek model
         logger.info(f"Processing request with query: {request.query[:50]}...")
+        
+        # Measure model inference time
+        inference_start = time.time()
         result = extract_context(
             app.state.model,
             app.state.tokenizer,
@@ -147,25 +160,42 @@ async def process_context(request: ContextRequest):
             request.query,
             max_length=request.max_context_length
         )
+        phase_timings["model_inference"] = time.time() - inference_start
         
-        # Save to cache directly (no background task)
+        # Save to cache
+        cache_save_start = time.time()
         save_to_cache(
             request.patient_data, 
             request.query, 
             request.max_context_length, 
             result
         )
+        phase_timings["cache_save"] = time.time() - cache_save_start
         
-        # Log memory at end of request
+        # Calculate total time
+        end_time = time.time()
+        total_time = end_time - start_time
+        
+        # Log memory and timing information
         mem_end = get_memory_usage()
         logger.info(f"Request completed - Memory: {mem_end['rss_mb']:.1f}MB, {mem_end['percent']:.1f}%")
+        logger.info(f"Total processing time: {total_time:.2f} seconds")
+        logger.info(f"Phase timings: Cache check: {phase_timings['cache_check']:.2f}s, " + 
+                   f"Model inference: {phase_timings['model_inference']:.2f}s, " + 
+                   f"Cache save: {phase_timings['cache_save']:.2f}s")
         
-        return ContextResponse(
+        # Update the ContextResponse class to include processing_time
+        class ContextResponseWithTiming(ContextResponse):
+            processing_time_seconds: float
+        
+        return ContextResponseWithTiming(
             relevant_context=result["context"],
-            cached=False
+            cached=False,
+            processing_time_seconds=total_time
         )
     except Exception as e:
-        logger.error(f"Error processing context: {str(e)}", exc_info=True)
+        error_time = time.time() - start_time
+        logger.error(f"Error after {error_time:.2f} seconds: {str(e)}", exc_info=True)
         clean_memory()  # Force cleanup on error
         raise HTTPException(status_code=500, detail=f"Error processing context: {str(e)}")
 
