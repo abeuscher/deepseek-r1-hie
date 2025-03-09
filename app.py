@@ -8,8 +8,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import json
 import uvicorn
 import os
+import sys
 import logging
 import time
+import signal
+import subprocess
 from contextlib import asynccontextmanager
 import hashlib
 import pickle
@@ -33,15 +36,81 @@ TOP_P = 0.95
 CACHE_DIR = os.path.join(os.path.expanduser("~"), "deepseek-app", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 
-# Force CPU mode for stability
+# CRITICAL: Completely disable GPU and MPS
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
-os.environ["PYTORCH_MPS_ENABLE_FALLBACK"] = "0"  # Disable MPS fallback
+os.environ["PYTORCH_MPS_ENABLE_FALLBACK"] = "0"
+
+# Explicitly disable MPS availability detection
+def disable_mps():
+    if hasattr(torch.backends, "mps"):
+        # Use a direct monkeypatch approach to ensure MPS is never used
+        torch.backends.mps.is_available = lambda: False
+        torch.backends.mps.is_built = lambda: False
+        # Set these for older PyTorch versions
+        if hasattr(torch, "has_mps"):
+            torch.has_mps = False
+    logger.info("MPS (Metal Performance Shaders) forcibly disabled")
+
+# Call the function to disable MPS
+disable_mps()
+
+# Set device to CPU explicitly
 DEVICE = "cpu"
+logger.info(f"Using device: {DEVICE}")
 
 # Set reasonable thread count for CPU
 NUM_THREADS = max(1, min(os.cpu_count() - 1, 4))  # Cap at 4 threads to avoid overuse
 torch.set_num_threads(NUM_THREADS)
 logger.info(f"Set PyTorch to use {NUM_THREADS} CPU threads")
+
+# Function to terminate any process using port 8000
+def kill_process_on_port(port=8000):
+    """Find and kill any process using the specified port"""
+    try:
+        # For macOS
+        result = subprocess.run(
+            ["lsof", "-i", f":{port}", "-t"], 
+            capture_output=True, 
+            text=True
+        )
+        
+        if result.stdout:
+            pids = result.stdout.strip().split("\n")
+            logger.info(f"Found processes using port {port}: {pids}")
+            
+            for pid in pids:
+                try:
+                    pid = int(pid.strip())
+                    # Don't kill our own process
+                    if pid != os.getpid():
+                        logger.info(f"Killing process {pid} using port {port}")
+                        os.kill(pid, signal.SIGTERM)
+                        time.sleep(0.5)  # Give it a moment to terminate
+                        # Check if it's still running and force kill if needed
+                        try:
+                            os.kill(pid, 0)  # This will raise an error if process is gone
+                            logger.info(f"Process {pid} still alive, sending SIGKILL")
+                            os.kill(pid, signal.SIGKILL)
+                        except OSError:
+                            logger.info(f"Process {pid} terminated successfully")
+                except (ValueError, ProcessLookupError) as e:
+                    logger.warning(f"Error processing PID {pid}: {str(e)}")
+            
+            # Verify port is now free
+            time.sleep(1)  # Wait a bit for the OS to release the port
+            check = subprocess.run(
+                ["lsof", "-i", f":{port}", "-t"], 
+                capture_output=True, 
+                text=True
+            )
+            if check.stdout.strip():
+                logger.warning(f"Port {port} still in use after termination attempts")
+            else:
+                logger.info(f"Port {port} is now free")
+        else:
+            logger.info(f"No process found using port {port}")
+    except Exception as e:
+        logger.error(f"Error killing process on port {port}: {str(e)}")
 
 # Simple caching functions
 def get_cache_key(patient_data, query, max_length):
@@ -85,14 +154,25 @@ def save_to_cache(patient_data, query, max_length, result):
 def clean_memory():
     """Force garbage collection"""
     gc.collect()
-    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    logger.info("Memory cleaned")
 
 # App lifespan for model loading/unloading
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Clean up on startup
+    clean_memory()
+    
     # Load model and tokenizer on startup
     logger.info(f"Loading model {MODEL_NAME}...")
-    clean_memory()
+    
+    # Verify we're using CPU
+    if torch.cuda.is_available():
+        logger.warning("CUDA is available but we're forcing CPU mode for stability")
+    
+    # Double-check MPS is disabled
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        logger.warning("MPS is still reporting as available, attempting to disable again")
+        disable_mps()
     
     # Download tokenizer
     app.state.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -101,16 +181,30 @@ async def lifespan(app: FastAPI):
     # Load model with minimal parameters and in simple CPU mode
     logger.info("Loading model in CPU mode...")
     try:
+        # Force CPU and set dtype
+        torch_dtype = torch.float32
+        logger.info(f"Using dtype: {torch_dtype}")
+        
         app.state.model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            torch_dtype=torch.float32,      # Use full precision for stability
+            torch_dtype=torch_dtype,
             trust_remote_code=True,
             low_cpu_mem_usage=True,
-            device_map=None                # No device map - simple loading
+            device_map="cpu"  # Explicitly set to CPU
         )
         
-        # Ensure model is on CPU
-        app.state.model = app.state.model.to(DEVICE)
+        # Ensure model is on CPU by iterating through all parameters
+        for param in app.state.model.parameters():
+            if param.device.type != "cpu":
+                logger.warning(f"Found parameter on {param.device}, moving to CPU")
+                param.data = param.data.to("cpu")
+        
+        # Check embedding layer specifically
+        if hasattr(app.state.model.model, "embed_tokens"):
+            if app.state.model.model.embed_tokens.weight.device.type != "cpu":
+                logger.warning(f"Embedding layer on {app.state.model.model.embed_tokens.weight.device}, moving to CPU")
+                app.state.model.model.embed_tokens = app.state.model.model.embed_tokens.to("cpu")
+        
         logger.info("Model loaded successfully on CPU!")
         
     except Exception as e:
@@ -199,9 +293,15 @@ I will extract only the sections, symptoms, diagnoses, treatments, lab results, 
 Based on the medical record, here is the relevant information to answer the question:
 """
     
-    # Generate response
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(DEVICE)
+    # Check we're using CPU
+    device_to_use = "cpu"
+    
+    # Generate response 
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device_to_use)
     attention_mask = torch.ones_like(input_ids)
+    
+    logger.info(f"Input device: {input_ids.device}")
+    logger.info(f"Model device: {next(model.parameters()).device}")
     
     with torch.no_grad():
         clean_memory()
@@ -209,6 +309,15 @@ Based on the medical record, here is the relevant information to answer the ques
         try:
             # Limit generation length for safety
             actual_max_tokens = min(max_length, 500)
+            
+            # Verify model's embedding layer is on CPU
+            if hasattr(model.model, "embed_tokens"):
+                embed_device = model.model.embed_tokens.weight.device
+                logger.info(f"Embedding layer device: {embed_device}")
+                
+                if embed_device.type != "cpu":
+                    logger.warning(f"Moving embedding layer from {embed_device} to CPU")
+                    model.model.embed_tokens = model.model.embed_tokens.to("cpu")
             
             output = model.generate(
                 input_ids,
@@ -227,6 +336,10 @@ Based on the medical record, here is the relevant information to answer the ques
             relevant_context = full_output[len(prompt):].strip()
             
             return {"context": relevant_context}
+        except Exception as e:
+            logger.error(f"Error during generation: {str(e)}", exc_info=True)
+            # Try a simplified response if generation fails
+            return {"context": f"Error processing patient data: {str(e)}. Please try with a simpler query or less data."}
         finally:
             clean_memory()
 
@@ -284,10 +397,18 @@ async def health_check():
         "processor_count": os.cpu_count()
     }
     
+    # Check model device if loaded
+    model_device = "not_loaded"
+    if hasattr(app.state, "model"):
+        try:
+            model_device = next(app.state.model.parameters()).device
+        except:
+            model_device = "unknown"
+    
     return {
         "status": "healthy", 
         "model": MODEL_NAME, 
-        "device": DEVICE,
+        "device": str(model_device),
         "memory_info": memory_info,
         "cache_entries": len(cache_files),
     }
@@ -307,6 +428,20 @@ async def clear_cache():
         raise HTTPException(status_code=500, detail=f"Error clearing cache: {str(e)}")
 
 if __name__ == "__main__":
+    # Kill any existing process using port 8000
+    logger.info("Checking for existing processes using port 8000")
+    kill_process_on_port(8000)
+    
     # Use localhost binding
-    host = "127.0.0.1" 
-    uvicorn.run("app:app", host=host, port=8000, log_level="info", reload=False)
+    host = "0.0.0.0"  # Bind to all interfaces
+    port = 8000
+    
+    try:
+        logger.info(f"Starting server on {host}:{port}")
+        uvicorn.run("app:app", host=host, port=port, log_level="info", reload=False)
+    except OSError as e:
+        if "address already in use" in str(e).lower():
+            logger.error(f"Port {port} is still in use despite termination attempts")
+            sys.exit(1)
+        else:
+            raise
