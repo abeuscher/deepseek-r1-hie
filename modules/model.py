@@ -106,7 +106,7 @@ I need to analyze a patient's medical record to extract only the information rel
 Here is the complete patient record:
 {json.dumps(processed_patient_data, indent=2)}
 
-I will extract only the sections, symptoms, diagnoses, treatments, lab results, and other information that are directly relevant to answering the specific question. I will ignore irrelevant information.
+I will extract only the health data and information that are directly relevant to answering the specific question. I will ignore irrelevant information.
 </think>
 
 Based on the medical record, here is the relevant information to answer the question:
