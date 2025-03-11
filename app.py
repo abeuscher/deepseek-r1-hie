@@ -21,6 +21,7 @@ from modules.device import DEVICE, disable_mps, NUM_THREADS
 from modules.cache import get_cached_result, save_to_cache, CACHE_DIR
 from modules.port import kill_process_on_port
 from modules.model import load_model, extract_context
+from modules.process_monitor import terminate_stale_processes  # Add this import
 
 # Set up logging
 logging.basicConfig(
@@ -257,7 +258,7 @@ async def clear_cache():
 if __name__ == "__main__":
     # Kill any existing process using port 8000
     logger.info("Checking for existing processes using port 8000")
-    kill_process_on_port(8000)
+    terminate_stale_processes(8000)  # Use our new function
     
     # Use localhost binding
     host = "0.0.0.0"  # Bind to all interfaces
