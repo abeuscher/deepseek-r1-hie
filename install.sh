@@ -124,6 +124,255 @@ EOF
   fi
 }
 
+# Configure Nginx with extended timeouts and SSL if applicable
+setup_nginx() {
+  echo "Setting up Nginx web server with extended timeouts..."
+  
+  # Check if Nginx is installed
+  if ! command -v nginx &> /dev/null; then
+    echo "Nginx is not installed. Installing now..."
+    if [ "$PKG_MANAGER" = "apt" ]; then
+      sudo apt update
+      sudo apt install -y nginx
+    elif [ "$PKG_MANAGER" = "dnf" ] || [ "$PKG_MANAGER" = "yum" ]; then
+      sudo $PKG_MANAGER install -y nginx
+    elif [ "$PKG_MANAGER" = "apk" ]; then
+      sudo apk add nginx
+    elif [ "$PKG_MANAGER" = "brew" ]; then
+      brew install nginx
+    else
+      echo "Could not install Nginx. Please install manually and run this script again."
+      return 1
+    fi
+  fi
+  
+  # Backup existing configuration if it exists
+  if [[ "$OSTYPE" == "darwin"* ]]; then
+    NGINX_CONF_DIR="/usr/local/etc/nginx/servers"
+    NGINX_CONF_FILE="$NGINX_CONF_DIR/deepseek.conf"
+    if [ -f "$NGINX_CONF_FILE" ]; then
+      cp "$NGINX_CONF_FILE" "$NGINX_CONF_FILE.bak.$(date +%Y%m%d%H%M%S)"
+    fi
+  else
+    NGINX_CONF_DIR="/etc/nginx/sites-available"
+    NGINX_CONF_FILE="$NGINX_CONF_DIR/deepseek"
+    if [ -f "$NGINX_CONF_FILE" ]; then
+      sudo cp "$NGINX_CONF_FILE" "$NGINX_CONF_FILE.bak.$(date +%Y%m%d%H%M%S)"
+    fi
+  fi
+  
+  # Check for existing SSL certificate paths and domain
+  SSL_CERT=""
+  SSL_KEY=""
+  DOMAIN_NAME=""
+  
+  if [ -f "$NGINX_CONF_FILE" ]; then
+    # Extract settings from existing config if they exist
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      SSL_CERT=$(grep -oP "ssl_certificate\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
+      SSL_KEY=$(grep -oP "ssl_certificate_key\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
+      DOMAIN_NAME=$(grep -oP "server_name\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "_")
+    else
+      SSL_CERT=$(sudo grep -oP "ssl_certificate\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
+      SSL_KEY=$(sudo grep -oP "ssl_certificate_key\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
+      DOMAIN_NAME=$(sudo grep -oP "server_name\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "_")
+    fi
+    
+    echo "Found existing Nginx configuration:"
+    [ -n "$SSL_CERT" ] && [ "$SSL_CERT" != " " ] && echo "- SSL Certificate: $SSL_CERT"
+    [ -n "$SSL_KEY" ] && [ "$SSL_KEY" != " " ] && echo "- SSL Key: $SSL_KEY"
+    [ -n "$DOMAIN_NAME" ] && [ "$DOMAIN_NAME" != " " ] && echo "- Domain: $DOMAIN_NAME"
+  else
+    # No existing config, use hostname or IP for domain
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      DOMAIN_NAME="localhost"
+    else
+      DOMAIN_NAME=$(hostname -I | awk '{print $1}')
+    fi
+    echo "No existing Nginx configuration. Using domain: $DOMAIN_NAME"
+  fi
+  
+  # Create Nginx configuration with extended timeouts
+  if [[ -n "$SSL_CERT" && -n "$SSL_KEY" && "$SSL_CERT" != " " && "$SSL_KEY" != " " ]]; then
+    # SSL configuration
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      # macOS Nginx config
+      cat > /tmp/deepseek.conf << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN_NAME};
+    
+    ssl_certificate ${SSL_CERT};
+    ssl_certificate_key ${SSL_KEY};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    
+    # Very long timeouts (30 minutes = 1800 seconds)
+    proxy_connect_timeout 1800s;
+    proxy_send_timeout 1800s;
+    proxy_read_timeout 1800s;
+    send_timeout 1800s;
+    
+    # Increase buffer sizes
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # Location-specific timeout settings
+        proxy_connect_timeout 1800s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+    }
+}
+EOF
+      cp /tmp/deepseek.conf "$NGINX_CONF_FILE"
+      rm /tmp/deepseek.conf
+      brew services restart nginx
+    else
+      # Linux Nginx config
+      sudo bash -c "cat > /tmp/deepseek << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name ${DOMAIN_NAME};
+    
+    ssl_certificate ${SSL_CERT};
+    ssl_certificate_key ${SSL_KEY};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    
+    # Very long timeouts (30 minutes = 1800 seconds)
+    proxy_connect_timeout 1800s;
+    proxy_send_timeout 1800s;
+    proxy_read_timeout 1800s;
+    send_timeout 1800s;
+    
+    # Increase buffer sizes
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # Location-specific timeout settings
+        proxy_connect_timeout 1800s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+    }
+}
+EOF"
+      sudo mv /tmp/deepseek "$NGINX_CONF_FILE"
+      sudo ln -sf "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/deepseek
+      
+      # Remove default site to avoid conflicts
+      if [ -f /etc/nginx/sites-enabled/default ]; then
+        sudo rm /etc/nginx/sites-enabled/default
+      fi
+      
+      sudo systemctl reload nginx
+    fi
+  else
+    # HTTP-only configuration
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+      # macOS Nginx config
+      cat > /tmp/deepseek.conf << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+    
+    # Very long timeouts (30 minutes = 1800 seconds)
+    proxy_connect_timeout 1800s;
+    proxy_send_timeout 1800s;
+    proxy_read_timeout 1800s;
+    send_timeout 1800s;
+    
+    # Increase buffer sizes
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # Location-specific timeout settings
+        proxy_connect_timeout 1800s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+    }
+}
+EOF
+      cp /tmp/deepseek.conf "$NGINX_CONF_FILE"
+      rm /tmp/deepseek.conf
+      brew services restart nginx
+    else
+      # Linux Nginx config
+      sudo bash -c "cat > /tmp/deepseek << EOF
+server {
+    listen 80;
+    server_name ${DOMAIN_NAME};
+    
+    # Very long timeouts (30 minutes = 1800 seconds)
+    proxy_connect_timeout 1800s;
+    proxy_send_timeout 1800s;
+    proxy_read_timeout 1800s;
+    send_timeout 1800s;
+    
+    # Increase buffer sizes
+    proxy_buffer_size 16k;
+    proxy_buffers 8 16k;
+    
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # Location-specific timeout settings
+        proxy_connect_timeout 1800s;
+        proxy_send_timeout 1800s;
+        proxy_read_timeout 1800s;
+    }
+}
+EOF"
+      sudo mv /tmp/deepseek "$NGINX_CONF_FILE"
+      sudo ln -sf "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/deepseek
+      
+      # Remove default site to avoid conflicts
+      if [ -f /etc/nginx/sites-enabled/default ]; then
+        sudo rm /etc/nginx/sites-enabled/default
+      fi
+      
+      sudo systemctl reload nginx
+    fi
+  fi
+  
+  echo "Nginx configured with extended timeouts (30 minutes)"
+}
+
 # Detect package manager
 detect_package_manager
 
@@ -139,9 +388,6 @@ mkdir -p ~/deepseek-app/logs
 echo "Installing the API service..."
 cp app.py ~/deepseek-app/api/
 
-# This is a patch to be added to the existing install.sh script
-# Add this code after the section where app.py is copied to the installation directory
-
 # Create modules directory
 echo "Setting up modular structure..."
 mkdir -p ~/deepseek-app/api/modules
@@ -154,11 +400,13 @@ cp modules/*.py ~/deepseek-app/api/modules/
 echo "Installing additional dependencies..."
 ~/deepseek-app/venv/bin/pip install psutil
 
-# This ends the patch section
-
 # Start the service
 echo "Starting the DeepSeek-R1 service..."
 setup_service
+
+# Configure Nginx with extended timeouts
+echo "Configuring Nginx web server..."
+setup_nginx
 
 # Display status
 echo "=== Installation complete! ==="
@@ -170,21 +418,31 @@ else
   sudo systemctl status deepseek
 fi
 
-# Check if Nginx is installed (indicating SSL was set up)
+# Check if Nginx was set up with a domain
 if [[ "$OSTYPE" == "darwin"* ]]; then
-  if [ -f /usr/local/etc/nginx/servers/deepseek.conf ]; then
-    domain=$(grep server_name /usr/local/etc/nginx/servers/deepseek.conf | awk '{print $2}' | sed 's/;//')
-    echo ""
-    echo "Your API is now available at: https://$domain/"
+  if [ -f "$NGINX_CONF_DIR/deepseek.conf" ]; then
+    domain=$(grep server_name "$NGINX_CONF_DIR/deepseek.conf" | awk '{print $2}' | sed 's/;//')
+    if grep -q "listen 443" "$NGINX_CONF_DIR/deepseek.conf"; then
+      echo ""
+      echo "Your API is now available at: https://$domain/"
+    else
+      echo ""
+      echo "Your API is now available at: http://$domain/"
+    fi
   else
     echo ""
     echo "Your API is now available at: http://localhost:8000/"
   fi
 else
-  if [ -f /etc/nginx/sites-enabled/deepseek ]; then
-    domain=$(grep server_name /etc/nginx/sites-available/deepseek | awk '{print $2}' | sed 's/;//')
-    echo ""
-    echo "Your API is now available at: https://$domain/"
+  if [ -f "/etc/nginx/sites-enabled/deepseek" ]; then
+    domain=$(sudo grep server_name /etc/nginx/sites-available/deepseek | awk '{print $2}' | sed 's/;//' | head -1)
+    if sudo grep -q "listen 443" /etc/nginx/sites-available/deepseek; then
+      echo ""
+      echo "Your API is now available at: https://$domain/"
+    else
+      echo ""
+      echo "Your API is now available at: http://$domain/"
+    fi
   else
     ip=$(hostname -I | awk '{print $1}')
     echo ""
