@@ -169,13 +169,15 @@ setup_nginx() {
   if [ -f "$NGINX_CONF_FILE" ]; then
     # Extract settings from existing config if they exist
     if [[ "$OSTYPE" == "darwin"* ]]; then
-      SSL_CERT=$(grep -oP "ssl_certificate\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
-      SSL_KEY=$(grep -oP "ssl_certificate_key\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
-      DOMAIN_NAME=$(grep -oP "server_name\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "_")
+      # Fix: Better parsing of SSL certificate paths
+      SSL_CERT=$(grep -oP "ssl_certificate\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null | tr -d ' ' || echo "")
+      SSL_KEY=$(grep -oP "ssl_certificate_key\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null | tr -d ' ' || echo "")
+      DOMAIN_NAME=$(grep -oP "server_name\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null | awk '{print $1}' || echo "_")
     else
-      SSL_CERT=$(sudo grep -oP "ssl_certificate\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
-      SSL_KEY=$(sudo grep -oP "ssl_certificate_key\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "")
-      DOMAIN_NAME=$(sudo grep -oP "server_name\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null || echo "_")
+      # Fix: Better parsing of SSL certificate paths
+      SSL_CERT=$(sudo grep -oP "ssl_certificate\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null | tr -d ' ' || echo "")
+      SSL_KEY=$(sudo grep -oP "ssl_certificate_key\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null | tr -d ' ' || echo "")
+      DOMAIN_NAME=$(sudo grep -oP "server_name\s+\K[^;]+" "$NGINX_CONF_FILE" 2>/dev/null | awk '{print $1}' || echo "_")
     fi
     
     echo "Found existing Nginx configuration:"
@@ -240,7 +242,7 @@ EOF
       rm /tmp/deepseek.conf
       brew services restart nginx
     else
-      # Linux Nginx config
+      # Linux Nginx config - Fix: Properly escaping variables and paths
       sudo bash -c "cat > /tmp/deepseek << EOF
 server {
     listen 80;
@@ -255,13 +257,12 @@ server {
     ssl_certificate ${SSL_CERT};
     ssl_certificate_key ${SSL_KEY};
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
     
     # Very long timeouts (30 minutes = 1800 seconds)
-    proxy_connect_timeout 1800s;
-    proxy_send_timeout 1800s;
-    proxy_read_timeout 1800s;
-    send_timeout 1800s;
+    proxy_connect_timeout 1800;
+    proxy_send_timeout 1800;
+    proxy_read_timeout 1800;
+    send_timeout 1800;
     
     # Increase buffer sizes
     proxy_buffer_size 16k;
@@ -275,9 +276,9 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         
         # Location-specific timeout settings
-        proxy_connect_timeout 1800s;
-        proxy_send_timeout 1800s;
-        proxy_read_timeout 1800s;
+        proxy_connect_timeout 1800;
+        proxy_send_timeout 1800;
+        proxy_read_timeout 1800;
     }
 }
 EOF"
@@ -335,10 +336,10 @@ server {
     server_name ${DOMAIN_NAME};
     
     # Very long timeouts (30 minutes = 1800 seconds)
-    proxy_connect_timeout 1800s;
-    proxy_send_timeout 1800s;
-    proxy_read_timeout 1800s;
-    send_timeout 1800s;
+    proxy_connect_timeout 1800;
+    proxy_send_timeout 1800;
+    proxy_read_timeout 1800;
+    send_timeout 1800;
     
     # Increase buffer sizes
     proxy_buffer_size 16k;
@@ -352,9 +353,9 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         
         # Location-specific timeout settings
-        proxy_connect_timeout 1800s;
-        proxy_send_timeout 1800s;
-        proxy_read_timeout 1800s;
+        proxy_connect_timeout 1800;
+        proxy_send_timeout 1800;
+        proxy_read_timeout 1800;
     }
 }
 EOF"
@@ -368,6 +369,17 @@ EOF"
       
       sudo systemctl reload nginx
     fi
+  fi
+  
+  # Add testing of configuration before reloading
+  echo "Testing Nginx configuration..."
+  if ! sudo nginx -t; then
+    echo "Nginx configuration failed validation. Reverting changes..."
+    if [ -f "${NGINX_CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)" ]; then
+      sudo cp "${NGINX_CONF_FILE}.bak.$(date +%Y%m%d%H%M%S}" "$NGINX_CONF_FILE"
+      echo "Restored previous configuration."
+    fi
+    return 1
   fi
   
   echo "Nginx configured with extended timeouts (30 minutes)"
