@@ -25,14 +25,18 @@ echo "Freeing system cache..."
 sync
 echo 3 > /proc/sys/vm/drop_caches
 
+# Ensure cache directory exists
+echo "Ensuring cache directory exists..."
+mkdir -p ~/deepseek-app/cache
+
 # Clear DeepSeek application cache
 echo "Clearing application cache..."
 rm -rf ~/deepseek-app/cache/*
 
 # Update the code if needed
 echo "Checking for code updates..."
-if [ -d "~/deepseek-r1-hie" ]; then
-  cd ~/deepseek-r1-hie
+if [ -d "$HOME/deepseek-r1-hie" ]; then
+  cd $HOME/deepseek-r1-hie
   if [ -d ".git" ]; then
     git pull
     # Copy updated files to the deployment directory
@@ -45,9 +49,33 @@ fi
 echo "Starting DeepSeek service..."
 systemctl start deepseek
 
-# Wait for service to be fully up
+# Wait for service to be fully up - much longer wait time (5 minutes)
 echo "Waiting for service to initialize..."
-sleep 5
+echo "This may take 2-5 minutes while the DeepSeek R1 model loads into memory..."
+
+# Show a progress indicator during the wait
+WAIT_TIME=300  # 5 minutes in seconds
+INTERVAL=15    # Update progress every 15 seconds
+STEPS=$((WAIT_TIME / INTERVAL))
+
+for i in $(seq 1 $STEPS); do
+  # Calculate percentage and create progress bar
+  PERCENT=$((i * 100 / STEPS))
+  ELAPSED=$((i * INTERVAL))
+  REMAINING=$((WAIT_TIME - ELAPSED))
+  
+  echo -ne "\r[$PERCENT%] Loading model... elapsed: ${ELAPSED}s, est. remaining: ${REMAINING}s"
+  
+  # Check if the service is responding early
+  if curl -s http://localhost:8000/health > /dev/null; then
+    echo -e "\r[100%] Service initialized successfully! (took ${ELAPSED} seconds)                    "
+    break
+  fi
+  
+  sleep $INTERVAL
+done
+
+echo "" # New line after progress bar
 
 # Check service status
 echo "Checking service status..."
@@ -56,9 +84,31 @@ systemctl status deepseek
 echo "=== Clean restart completed ==="
 echo "The API should now be available with a fresh instance"
 
-# Test health endpoint
+# Test health endpoint with retry logic
 echo "Testing health endpoint..."
-curl -s http://localhost:8000/health | grep -q "healthy" && \
-  echo "✅ API is responding correctly" || \
-  echo "❌ API failed to respond correctly"
-```
+MAX_RETRIES=10
+RETRY_INTERVAL=30  # 30 seconds between retries
+retry_count=0
+success=false
+
+while [ $retry_count -lt $MAX_RETRIES ] && [ "$success" = false ]; do
+  if curl -s http://localhost:8000/health | grep -q "healthy"; then
+    echo "✅ API is responding correctly"
+    success=true
+  else
+    retry_count=$((retry_count+1))
+    if [ $retry_count -lt $MAX_RETRIES ]; then
+      echo "API not ready yet, retrying in ${RETRY_INTERVAL} seconds (attempt $retry_count of $MAX_RETRIES)..."
+      sleep $RETRY_INTERVAL
+    else
+      echo "❌ API failed to respond correctly after $MAX_RETRIES attempts"
+    fi
+  fi
+done
+
+# Check if Nginx is configured
+if [ -f "/etc/nginx/sites-enabled/deepseek" ]; then
+  echo "Reloading Nginx configuration..."
+  systemctl reload nginx
+  echo "✅ Nginx configuration reloaded"
+fi
