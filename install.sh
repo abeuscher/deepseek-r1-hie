@@ -109,8 +109,9 @@ User=$USER
 WorkingDirectory=$HOME/deepseek-app/api
 ExecStart=$HOME/deepseek-app/venv/bin/python3 $HOME/deepseek-app/api/app.py
 Restart=always
-StandardOutput=journal
-StandardError=journal
+# Redirect output to log files instead of journal
+StandardOutput=append:$HOME/deepseek-app/logs/deepseek.log
+StandardError=append:$HOME/deepseek-app/logs/deepseek-error.log
 Environment="PYTHONPATH=$HOME/deepseek-app"
 
 [Install]
