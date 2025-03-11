@@ -41,7 +41,8 @@
     "test-endpoint": "curl -X POST -H \"Content-Type: application/json\" -d @./test-data.json http://localhost:8000/process-context",
     "generate-test-data": "echo '{\"patient_data\": {\"name\": \"Test Patient\", \"age\": 45}, \"query\": \"What is the patient diagnosis?\", \"max_context_length\": 500}' > test-data.json",
     
-    "docs": "echo 'API Documentation' && echo 'Endpoints:' && echo '- GET /health: Check API health' && echo '- POST /process-context: Process patient data and extract context' && echo '- GET /cache/clear: Clear the request cache'"
+    "docs": "echo 'API Documentation' && echo 'Endpoints:' && echo '- GET /health: Check API health' && echo '- POST /process-context: Process patient data and extract context' && echo '- GET /cache/clear: Clear the request cache'",
+    "setup-nginx": "sudo bash nginx-config.sh"
   },
   "keywords": [
     "deepseek",
