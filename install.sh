@@ -388,7 +388,7 @@ EOF
     return 1
   fi
   
-  echo "Nginx configured with extended timeouts (30 minutes)"
+  echo "Nginx configured with extended timeouts 30 minutes"
 }
 
 # Detect package manager
