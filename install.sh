@@ -199,11 +199,11 @@ setup_nginx() {
     # SSL configuration
     if [[ "$OSTYPE" == "darwin"* ]]; then
       # macOS Nginx config
-      cat > /tmp/deepseek.conf << EOF
+      cat > /tmp/deepseek.conf << 'EOF'
 server {
     listen 80;
     server_name ${DOMAIN_NAME};
-    return 301 https://\$host\$request_uri;
+    return 301 https://$host$request_uri;
 }
 
 server {
@@ -226,10 +226,10 @@ server {
     
     location / {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         
         # Location-specific timeout settings
         proxy_connect_timeout 1800s;
@@ -238,24 +238,26 @@ server {
     }
 }
 EOF
+      # Replace variables in the template
+      sed -i '' "s/\${DOMAIN_NAME}/$DOMAIN_NAME/g; s/\${SSL_CERT}/$SSL_CERT/g; s/\${SSL_KEY}/$SSL_KEY/g" /tmp/deepseek.conf
       cp /tmp/deepseek.conf "$NGINX_CONF_FILE"
       rm /tmp/deepseek.conf
       brew services restart nginx
     else
-      # Linux Nginx config - Fix: Properly escaping variables and paths
-      sudo bash -c "cat > /tmp/deepseek << EOF
+      # Linux Nginx config - Fix: Using a different approach with sed
+      cat > /tmp/deepseek << 'EOF'
 server {
     listen 80;
-    server_name ${DOMAIN_NAME};
-    return 301 https://\$host\$request_uri;
+    server_name SERVER_NAME_PLACEHOLDER;
+    return 301 https://$host$request_uri;
 }
 
 server {
     listen 443 ssl;
-    server_name ${DOMAIN_NAME};
+    server_name SERVER_NAME_PLACEHOLDER;
     
-    ssl_certificate ${SSL_CERT};
-    ssl_certificate_key ${SSL_KEY};
+    ssl_certificate SSL_CERT_PLACEHOLDER;
+    ssl_certificate_key SSL_KEY_PLACEHOLDER;
     ssl_protocols TLSv1.2 TLSv1.3;
     
     # Very long timeouts (30 minutes = 1800 seconds)
@@ -270,10 +272,10 @@ server {
     
     location / {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         
         # Location-specific timeout settings
         proxy_connect_timeout 1800;
@@ -281,7 +283,9 @@ server {
         proxy_read_timeout 1800;
     }
 }
-EOF"
+EOF
+      # Replace placeholders with actual values
+      sudo sed -i "s/SERVER_NAME_PLACEHOLDER/$DOMAIN_NAME/g; s|SSL_CERT_PLACEHOLDER|$SSL_CERT|g; s|SSL_KEY_PLACEHOLDER|$SSL_KEY|g" /tmp/deepseek
       sudo mv /tmp/deepseek "$NGINX_CONF_FILE"
       sudo ln -sf "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/deepseek
       
@@ -293,10 +297,10 @@ EOF"
       sudo systemctl reload nginx
     fi
   else
-    # HTTP-only configuration
+    # HTTP-only configuration - Apply similar fixes here
     if [[ "$OSTYPE" == "darwin"* ]]; then
       # macOS Nginx config
-      cat > /tmp/deepseek.conf << EOF
+      cat > /tmp/deepseek.conf << 'EOF'
 server {
     listen 80;
     server_name ${DOMAIN_NAME};
@@ -313,10 +317,10 @@ server {
     
     location / {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         
         # Location-specific timeout settings
         proxy_connect_timeout 1800s;
@@ -325,15 +329,16 @@ server {
     }
 }
 EOF
+      sed -i '' "s/\${DOMAIN_NAME}/$DOMAIN_NAME/g" /tmp/deepseek.conf
       cp /tmp/deepseek.conf "$NGINX_CONF_FILE"
       rm /tmp/deepseek.conf
       brew services restart nginx
     else
       # Linux Nginx config
-      sudo bash -c "cat > /tmp/deepseek << EOF
+      cat > /tmp/deepseek << 'EOF'
 server {
     listen 80;
-    server_name ${DOMAIN_NAME};
+    server_name SERVER_NAME_PLACEHOLDER;
     
     # Very long timeouts (30 minutes = 1800 seconds)
     proxy_connect_timeout 1800;
@@ -347,10 +352,10 @@ server {
     
     location / {
         proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
         
         # Location-specific timeout settings
         proxy_connect_timeout 1800;
@@ -358,7 +363,8 @@ server {
         proxy_read_timeout 1800;
     }
 }
-EOF"
+EOF
+      sudo sed -i "s/SERVER_NAME_PLACEHOLDER/$DOMAIN_NAME/g" /tmp/deepseek
       sudo mv /tmp/deepseek "$NGINX_CONF_FILE"
       sudo ln -sf "$NGINX_CONF_FILE" /etc/nginx/sites-enabled/deepseek
       
