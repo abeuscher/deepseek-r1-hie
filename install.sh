@@ -382,7 +382,7 @@ EOF
   if ! sudo nginx -t; then
     echo "Nginx configuration failed validation. Reverting changes..."
     if [ -f "${NGINX_CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)" ]; then
-      sudo cp "${NGINX_CONF_FILE}.bak.$(date +%Y%m%d%H%M%S}" "$NGINX_CONF_FILE"
+      sudo cp "${NGINX_CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)" "$NGINX_CONF_FILE"
       echo "Restored previous configuration."
     fi
     return 1
@@ -470,7 +470,7 @@ fi
 
 echo ""
 echo "API endpoints:"
-echo "- /health (GET): Check if the service is running"
+echo "- /health GET: Check if the service is running"
 echo "- /process-context (POST): Process patient data and extract relevant context"
 echo ""
 echo "For more information, refer to the README.md file."
